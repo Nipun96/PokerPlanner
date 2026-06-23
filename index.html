@@ -1,0 +1,264 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Aesthetic Planning Poker</title>
+  <!-- Google Fonts - Outfit -->
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+  <!-- Stylesheet -->
+  <link rel="stylesheet" href="style.css">
+  <!-- MQTT.js client via CDN -->
+  <script src="https://unpkg.com/mqtt/dist/mqtt.min.js"></script>
+  <!-- Canvas Confetti via CDN -->
+  <script src="https://cdn.jsdelivr.net/npm/canvas-confetti@1.6.0/dist/confetti.browser.min.js"></script>
+</head>
+<body class="light-theme">
+  <!-- Header Bar -->
+  <header class="app-header">
+    <div class="header-logo">
+      <svg class="logo-icon" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+        <rect x="3" y="3" width="18" height="18" rx="2" />
+        <path d="M7 12h10" />
+        <path d="M12 7v10" />
+      </svg>
+      <span>PlanIt<strong>Aesthetic</strong></span>
+    </div>
+    
+    <div class="header-actions">
+      <!-- Connection Status indicator -->
+      <div id="connectionStatus" class="connection-status offline" title="Connection status">
+        <span class="status-dot"></span>
+        <span class="status-text">Connecting...</span>
+      </div>
+      
+      <!-- Theme Switcher -->
+      <button id="themeToggle" class="btn-icon" aria-label="Toggle dark mode" title="Toggle Theme">
+        <svg class="sun-icon" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <circle cx="12" cy="12" r="4" />
+          <path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M6.34 17.66l-1.41 1.41M19.07 4.93l-1.41 1.41" />
+        </svg>
+        <svg class="moon-icon" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="display: none;">
+          <path d="M12 3a6 6 0 0 0 9 9 9 9 0 1 1-9-9Z" />
+        </svg>
+      </button>
+
+      <!-- Exit Button (hidden on welcome screen) -->
+      <button id="leaveRoomBtn" class="btn-icon danger-btn" style="display: none;" aria-label="Leave room" title="Leave Room">
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4M16 17l5-5-5-5M21 12H9"/>
+        </svg>
+      </button>
+    </div>
+  </header>
+
+  <main class="app-container">
+    <!-- Screen 1: Welcome / Join Room -->
+    <section id="welcomeScreen" class="screen-panel active-screen">
+      <div class="welcome-card">
+        <div class="welcome-header">
+          <h1>Planning Poker</h1>
+          <p>Estimate stories collaboratively in real-time. Simple, beautiful, and secure.</p>
+        </div>
+
+        <form id="joinForm" class="welcome-form">
+          <div class="form-group">
+            <label for="usernameInput">Your Name</label>
+            <div class="input-wrapper">
+              <svg class="input-icon" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <path d="M19 21v-2a4 4 0 0 0-4-4H9a4 4 0 0 0-4 4v2" />
+                <circle cx="12" cy="7" r="4" />
+              </svg>
+              <input type="text" id="usernameInput" placeholder="Enter your name..." required maxlength="15" autocomplete="off">
+            </div>
+          </div>
+
+          <div class="form-group">
+            <label for="roomInput">Room Name</label>
+            <div class="input-wrapper">
+              <svg class="input-icon" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" />
+                <polyline points="9 22 9 12 15 12 15 22" />
+              </svg>
+              <input type="text" id="roomInput" placeholder="Enter room name..." required maxlength="25" autocomplete="off">
+              <button type="button" id="randomRoomBtn" class="btn-secondary-inline" title="Generate random room ID">
+                Random
+              </button>
+            </div>
+          </div>
+
+          <button type="submit" class="btn-primary btn-block">
+            <span>Enter Room</span>
+            <svg class="btn-arrow" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <line x1="5" y1="12" x2="19" y2="12"></line>
+              <polyline points="12 5 19 12 12 19"></polyline>
+            </svg>
+          </button>
+        </form>
+
+        <div id="recentRoomsSection" class="recent-rooms-wrapper" style="display: none;">
+          <h3>Recent Rooms</h3>
+          <ul id="recentRoomsList" class="recent-rooms-list">
+            <!-- Dynamically populated -->
+          </ul>
+        </div>
+      </div>
+    </section>
+
+    <!-- Screen 2: Poker Board -->
+    <section id="boardScreen" class="screen-panel" style="display: none;">
+      <div class="board-layout">
+        <!-- Main Estimation Area (Cards Grid & Story Details) -->
+        <div class="board-main">
+          <div class="room-details-header">
+            <h2 id="roomTitleDisplay">room</h2>
+            <div class="story-container">
+              <div class="story-title-wrapper" id="storyTitleWrapper">
+                <span id="storyTitleDisplay">test</span>
+                <button id="editStoryBtn" class="btn-icon-inline" title="Edit Story Description">
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <path d="M12 20h9M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"/>
+                  </svg>
+                </button>
+              </div>
+              <div class="story-edit-wrapper" id="storyEditWrapper" style="display: none;">
+                <input type="text" id="storyInput" maxlength="60" placeholder="Estimate description (e.g. Jira-123)...">
+                <button id="saveStoryBtn" class="btn-save" title="Save">
+                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
+                    <polyline points="20 6 9 17 4 12"></polyline>
+                  </svg>
+                </button>
+                <button id="cancelStoryBtn" class="btn-cancel" title="Cancel">
+                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
+                    <line x1="18" y1="6" x2="6" y2="18"></line>
+                    <line x1="6" y1="6" x2="18" y2="18"></line>
+                  </svg>
+                </button>
+              </div>
+            </div>
+          </div>
+
+          <!-- Cards Grid -->
+          <div id="deckGrid" class="cards-grid">
+            <!-- Cards will be populated dynamically -->
+          </div>
+          
+          <!-- Statistics Display (Revealed Mode) -->
+          <div id="statsPanel" class="stats-panel" style="display: none;">
+            <h3>Estimation Results</h3>
+            <div class="stats-grid">
+              <div class="stat-box">
+                <span class="stat-label">Average</span>
+                <span id="statAverage" class="stat-value">-</span>
+              </div>
+              <div class="stat-box">
+                <span class="stat-label">Median</span>
+                <span id="statMedian" class="stat-value">-</span>
+              </div>
+              <div class="stat-box">
+                <span class="stat-label">Agreement</span>
+                <span id="statAgreement" class="stat-value">-</span>
+              </div>
+              <div class="stat-box">
+                <span class="stat-label">Range</span>
+                <span id="statRange" class="stat-value">-</span>
+              </div>
+            </div>
+            <!-- Dynamic chart placeholder or frequency distribution -->
+            <div class="vote-distribution">
+              <h4>Vote Distribution</h4>
+              <div id="distributionBarChart" class="distribution-chart">
+                <!-- Populated dynamically -->
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Sidebar (Actions & Player Status) -->
+        <aside class="board-sidebar">
+          <!-- Game State Indicator -->
+          <div id="gameStateIndicator" class="state-banner state-waiting">
+            Waiting for votes
+          </div>
+
+          <!-- Room Action Buttons -->
+          <div class="sidebar-actions">
+            <button id="resetTimerBtn" class="btn-sidebar">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <path d="M21.5 2v6h-6M21.34 15.57a10 10 0 1 1-.57-8.38l5.67-5.67"/>
+              </svg>
+              Reset Timer
+            </button>
+            <button id="flipCardsBtn" class="btn-sidebar btn-highlight">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <rect x="2" y="3" width="20" height="14" rx="2" ry="2"/>
+                <line x1="8" y1="21" x2="16" y2="21"/>
+                <line x1="12" y1="17" x2="12" y2="21"/>
+              </svg>
+              Flip Cards
+            </button>
+            <button id="clearVotesBtn" class="btn-sidebar">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <path d="M3 6h18M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/>
+                <line x1="10" y1="11" x2="10" y2="17"/>
+                <line x1="14" y1="11" x2="14" y2="17"/>
+              </svg>
+              Clear Votes
+            </button>
+            <button id="skipStoryBtn" class="btn-sidebar">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <polygon points="5 4 15 12 5 20 5 4"/>
+                <line x1="19" y1="5" x2="19" y2="19"/>
+              </svg>
+              Skip Story
+            </button>
+          </div>
+
+          <!-- Players Header with Timer -->
+          <div class="players-header">
+            <h3>Players</h3>
+            <div class="timer-display">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="timer-icon">
+                <circle cx="12" cy="12" r="10" />
+                <polyline points="12 6 12 12 16 14" />
+              </svg>
+              <span id="roomTimer">00:00:00</span>
+            </div>
+          </div>
+
+          <!-- Players List -->
+          <div class="players-list-wrapper">
+            <ul id="playersList" class="players-list">
+              <!-- Dynamically populated -->
+            </ul>
+          </div>
+
+          <!-- Invite Teammate Accordion -->
+          <div class="invite-accordion">
+            <button id="inviteAccordionToggle" class="invite-toggle">
+              <span>Invite a teammate</span>
+              <svg class="chevron-icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <polyline points="6 9 12 15 18 9"></polyline>
+              </svg>
+            </button>
+            <div id="inviteAccordionContent" class="invite-content" style="display: none;">
+              <p>Share this link to invite teammates to this estimation room:</p>
+              <div class="invite-input-group">
+                <input type="text" id="inviteLinkInput" readonly>
+                <button id="copyInviteLinkBtn" class="btn-primary" title="Copy shareable link">
+                  Copy
+                </button>
+              </div>
+            </div>
+          </div>
+        </aside>
+      </div>
+    </section>
+  </main>
+
+  <!-- Script File -->
+  <script src="app.js"></script>
+</body>
+</html>

@@ -1,0 +1,1241 @@
+/**
+ * PlanItAesthetic - Modern Planning Poker Client
+ * Fully client-side, real-time collaboration using MQTT over Secure WebSockets.
+ */
+
+// ==========================================================================
+// Application Configuration & Constants
+// ==========================================================================
+const DECK_VALUES = ['0', '1', '2', '3', '4', '5', '6', '7', '8', '9', '10', '?', 'C'];
+
+// Public secure WebSocket MQTT brokers to try in sequence
+const BROKERS = [
+  'wss://broker.emqx.io:8084/mqtt',
+  'wss://test.mosquitto.org:8081/mqtt',
+  'wss://broker.hivemq.com:8000/mqtt' // Insecure WebSocket fallback (may be blocked by browser HTTPS)
+];
+
+// ==========================================================================
+// Application State
+// ==========================================================================
+const state = {
+  // User Profile
+  username: '',
+  userId: '',
+  
+  // Room Status
+  roomName: '',
+  roomId: '',
+  currentStory: 'Estimate Task Description',
+  gameState: 'voting', // 'voting' | 'revealed'
+  
+  // Timer State
+  timerSeconds: 0,
+  timerInterval: null,
+  isTimerHost: false, // The oldest online user maintains/broadcasts the timer
+  
+  // Players (Real and Simulated)
+  players: {}, // Map of userId -> player details
+  
+  // Local User Selection
+  currentVote: null,
+  voteTime: 0, // Time when local user voted
+  voteTimerStart: 0,
+  
+  // Connection and Mode
+  mqttClient: null,
+  currentBrokerIndex: 0,
+  isOfflineMode: false,
+  connectionTimeout: null,
+  
+  // UI Accordion State
+  isInviteOpen: false
+};
+
+// ==========================================================================
+// Core Initialization
+// ==========================================================================
+document.addEventListener('DOMContentLoaded', () => {
+  generateUserId();
+  loadProfileFromCache();
+  initRouting();
+  setupEventListeners();
+  renderDeck();
+});
+
+// Generate a random unique ID for the user
+function generateUserId() {
+  let id = localStorage.getItem('poker_user_id');
+  if (!id) {
+    id = 'user_' + Math.random().toString(36).substring(2, 11);
+    localStorage.setItem('poker_user_id', id);
+  }
+  state.userId = id;
+}
+
+// Load profile and room history
+function loadProfileFromCache() {
+  const profile = JSON.parse(localStorage.getItem('poker_user_profile') || '{}');
+  if (profile.username) {
+    state.username = profile.username;
+    document.getElementById('usernameInput').value = profile.username;
+  }
+  renderRecentRooms();
+}
+
+// Check URL hash for room auto-routing
+function initRouting() {
+  const hash = window.location.hash;
+  if (hash.startsWith('#/room/')) {
+    const roomId = decodeURIComponent(hash.substring(7));
+    state.roomId = roomId;
+    state.roomName = roomId.split('-')[0] || roomId; // Extract room title
+    
+    // Fill the room input
+    document.getElementById('roomInput').value = state.roomName;
+    
+    // If username is cached, auto-join, otherwise wait for submit
+    if (state.username) {
+      joinRoom();
+    } else {
+      showScreen('welcomeScreen');
+    }
+  } else {
+    // Welcome screen default
+    showScreen('welcomeScreen');
+    generateRandomRoomName();
+  }
+}
+
+// Generate a random fun name for rooms
+function generateRandomRoomName() {
+  const adjs = ['agile', 'scrum', 'sprint', 'retro', 'velocity', 'poker', 'feature', 'epic'];
+  const nouns = ['ninjas', 'wizards', 'titans', 'builders', 'coders', 'masters', 'squad'];
+  const adj = adjs[Math.floor(Math.random() * adjs.length)];
+  const noun = nouns[Math.floor(Math.random() * nouns.length)];
+  const num = Math.floor(100 + Math.random() * 900);
+  
+  const randomName = `${adj}-${noun}-${num}`;
+  document.getElementById('roomInput').value = randomName;
+}
+
+// Screen management
+function showScreen(screenId) {
+  document.querySelectorAll('.screen-panel').forEach(screen => {
+    screen.style.display = 'none';
+    screen.classList.remove('active-screen');
+  });
+  const screen = document.getElementById(screenId);
+  screen.style.display = screenId === 'boardScreen' ? 'grid' : 'flex';
+  screen.classList.add('active-screen');
+
+  if (screenId === 'boardScreen') {
+    document.getElementById('leaveRoomBtn').style.display = 'flex';
+  } else {
+    document.getElementById('leaveRoomBtn').style.display = 'none';
+  }
+}
+
+// ==========================================================================
+// UI Rendering Functions
+// ==========================================================================
+
+// Render the 13 card deck
+function renderDeck() {
+  const grid = document.getElementById('deckGrid');
+  grid.innerHTML = '';
+  
+  DECK_VALUES.forEach((val, idx) => {
+    const card = document.createElement('div');
+    card.className = 'poker-card-container';
+    card.dataset.value = val;
+    
+    // Determine card value content
+    let centerValue = val;
+    if (val === 'C') {
+      // SVG Coffee Cup Icon
+      centerValue = `
+        <svg class="coffee-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M17 8h1a4 4 0 1 1 0 8h-1" />
+          <path d="M3 8h14v9a4 4 0 0 1-4 4H7a4 4 0 0 1-4-4Z" />
+          <line x1="6" y1="2" x2="6" y2="4" />
+          <line x1="10" y1="2" x2="10" y2="4" />
+          <line x1="14" y1="2" x2="14" y2="4" />
+        </svg>
+      `;
+    }
+
+    card.innerHTML = `
+      <div class="poker-card-inner">
+        <div class="card-front">
+          <div class="card-corner top-left">${val}</div>
+          <div class="card-value">${centerValue}</div>
+          <div class="card-corner bottom-right">${val}</div>
+        </div>
+      </div>
+    `;
+    
+    card.addEventListener('click', () => handleCardSelection(val));
+    grid.appendChild(card);
+  });
+}
+
+// Render dynamic players list
+function renderPlayersList() {
+  const list = document.getElementById('playersList');
+  list.innerHTML = '';
+  
+  const sortedUserIds = Object.keys(state.players).sort();
+  
+  sortedUserIds.forEach(id => {
+    const player = state.players[id];
+    const isMe = id === state.userId;
+    const hasVoted = player.hasVoted;
+    
+    const li = document.createElement('li');
+    li.className = `player-row ${isMe ? 'me' : ''}`;
+    
+    // Initial letter for avatar
+    const initial = (player.name || '?').substring(0, 2);
+    
+    // Format timer value
+    const voteTimeStr = player.timeToVote > 0 ? formatTimer(player.timeToVote) : '';
+
+    // Right-side card indicator status
+    let rightStatusHTML = '';
+    if (state.gameState === 'voting') {
+      if (hasVoted) {
+        // Card face down
+        rightStatusHTML = `
+          <div class="mini-vote-card voted" title="Voted!">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3">
+              <polyline points="20 6 9 17 4 12"></polyline>
+            </svg>
+          </div>
+        `;
+      } else {
+        // Thinking pulse
+        rightStatusHTML = `<div class="mini-vote-card thinking" title="Thinking...">...</div>`;
+      }
+    } else {
+      // Game state is REVEALED
+      if (player.vote !== null && player.vote !== undefined) {
+        // Show actual value
+        let displayVote = player.vote;
+        if (player.vote === 'C') {
+          displayVote = '☕';
+        }
+        rightStatusHTML = `<div class="mini-vote-card revealed-card" title="Estimate: ${player.vote}">${displayVote}</div>`;
+      } else {
+        rightStatusHTML = `<div class="mini-vote-card did-not-vote" title="Did not vote">-</div>`;
+      }
+    }
+
+    li.innerHTML = `
+      <div class="player-left">
+        <div class="player-avatar-container">
+          <div class="player-avatar">${initial}</div>
+          <div class="player-status-badge ${player.status === 'online' ? 'online' : ''}"></div>
+        </div>
+        <div class="player-info">
+          <span class="player-name">${player.name} ${isMe ? '<span class="player-tag-me">(you)</span>' : ''}</span>
+          ${voteTimeStr ? `<span class="player-vote-duration">Voted in ${voteTimeStr}</span>` : ''}
+        </div>
+      </div>
+      <div class="player-right">
+        ${rightStatusHTML}
+      </div>
+    `;
+    
+    list.appendChild(li);
+  });
+}
+
+// Render recent rooms history list
+function renderRecentRooms() {
+  const history = JSON.parse(localStorage.getItem('poker_room_history') || '[]');
+  const list = document.getElementById('recentRoomsList');
+  const section = document.getElementById('recentRoomsSection');
+  
+  if (history.length === 0) {
+    section.style.display = 'none';
+    return;
+  }
+  
+  section.style.display = 'block';
+  list.innerHTML = '';
+  
+  // Show last 5 rooms
+  history.slice(0, 5).forEach(item => {
+    const li = document.createElement('li');
+    li.className = 'recent-room-item';
+    
+    // Format timestamp
+    const date = new Date(item.timestamp);
+    const dateStr = date.toLocaleDateString() + ' ' + date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+    
+    li.innerHTML = `
+      <span class="recent-room-name">${item.roomName}</span>
+      <span class="recent-room-time">${dateStr}</span>
+    `;
+    
+    li.addEventListener('click', () => {
+      document.getElementById('roomInput').value = item.roomName;
+      if (state.username) {
+        state.roomName = item.roomName;
+        joinRoom();
+      } else {
+        document.getElementById('usernameInput').focus();
+      }
+    });
+    
+    list.appendChild(li);
+  });
+}
+
+// Update the game state banner in sidebar
+function updateStateBanner() {
+  const banner = document.getElementById('gameStateIndicator');
+  
+  if (state.gameState === 'voting') {
+    // Count players voted
+    const totalPlayers = Object.keys(state.players).length;
+    const votedCount = Object.values(state.players).filter(p => p.hasVoted).length;
+    
+    banner.className = 'state-banner state-waiting';
+    
+    if (votedCount === 0) {
+      banner.innerText = 'Waiting for votes';
+    } else if (votedCount < totalPlayers) {
+      // Find who hasn't voted yet
+      const missing = Object.values(state.players)
+        .filter(p => !p.hasVoted)
+        .map(p => p.name);
+      
+      if (missing.length === 1) {
+        banner.innerText = `Waiting for ${missing[0]} to vote`;
+      } else {
+        banner.innerText = `Waiting for ${missing.length} players to vote`;
+      }
+    } else {
+      banner.innerText = 'All players have voted!';
+    }
+  } else {
+    banner.className = 'state-banner state-revealed';
+    banner.innerText = 'Cards Revealed!';
+  }
+}
+
+// Calculate and render estimate statistics
+function renderStats() {
+  const panel = document.getElementById('statsPanel');
+  
+  if (state.gameState === 'voting') {
+    panel.style.display = 'none';
+    return;
+  }
+  
+  const votes = Object.values(state.players)
+    .map(p => p.vote)
+    .filter(v => v !== null && v !== undefined && v !== '');
+  
+  if (votes.length === 0) {
+    panel.style.display = 'none';
+    return;
+  }
+  
+  panel.style.display = 'block';
+  
+  // Calculate average and median (ignore non-numeric cards like '?' and 'C')
+  const numericVotes = votes
+    .map(v => parseFloat(v))
+    .filter(v => !isNaN(v))
+    .sort((a, b) => a - b);
+  
+  let average = '-';
+  let median = '-';
+  let voteRange = '-';
+  
+  if (numericVotes.length > 0) {
+    // Average
+    const sum = numericVotes.reduce((acc, curr) => acc + curr, 0);
+    average = (sum / numericVotes.length).toFixed(1);
+    
+    // Median
+    const mid = Math.floor(numericVotes.length / 2);
+    if (numericVotes.length % 2 === 0) {
+      median = ((numericVotes[mid - 1] + numericVotes[mid]) / 2).toFixed(1);
+    } else {
+      median = numericVotes[mid].toString();
+    }
+    
+    // Range
+    const min = numericVotes[0];
+    const max = numericVotes[numericVotes.length - 1];
+    voteRange = min === max ? min.toString() : `${min} - ${max}`;
+  }
+  
+  // Agreement percentage
+  // Find highest frequency count of any vote
+  const freqMap = {};
+  votes.forEach(v => {
+    freqMap[v] = (freqMap[v] || 0) + 1;
+  });
+  
+  let maxFreq = 0;
+  let consensusValue = null;
+  Object.keys(freqMap).forEach(v => {
+    if (freqMap[v] > maxFreq) {
+      maxFreq = freqMap[v];
+      consensusValue = v;
+    }
+  });
+  
+  const agreement = Math.round((maxFreq / votes.length) * 100);
+  
+  // Populate UI
+  document.getElementById('statAverage').innerText = average;
+  document.getElementById('statMedian').innerText = median;
+  document.getElementById('statRange').innerText = voteRange;
+  document.getElementById('statAgreement').innerText = `${agreement}%`;
+  
+  // Render distribution chart
+  const chartContainer = document.getElementById('distributionBarChart');
+  chartContainer.innerHTML = '';
+  
+  // Sort keys based on our custom deck sorting
+  const sortedVoteKeys = Object.keys(freqMap).sort((a, b) => {
+    return DECK_VALUES.indexOf(a) - DECK_VALUES.indexOf(b);
+  });
+  
+  sortedVoteKeys.forEach(voteVal => {
+    const count = freqMap[voteVal];
+    const percentage = Math.round((count / votes.length) * 100);
+    const row = document.createElement('div');
+    row.className = 'chart-row';
+    
+    row.innerHTML = `
+      <span class="chart-value-label">${voteVal === 'C' ? '☕' : voteVal}</span>
+      <div class="chart-bar-container">
+        <div class="chart-bar" style="width: ${percentage}%"></div>
+      </div>
+      <span class="chart-count-label">${count} vote${count > 1 ? 's' : ''} (${percentage}%)</span>
+    `;
+    chartContainer.appendChild(row);
+  });
+  
+  // Trigger confetti if consensus is 100% agreement and at least 2 real votes
+  if (agreement === 100 && votes.length >= 2 && consensusValue !== '?' && consensusValue !== 'C') {
+    triggerConfetti();
+  }
+}
+
+// Confetti blast animation
+function triggerConfetti() {
+  if (window.confetti) {
+    const duration = 2.5 * 1000;
+    const animationEnd = Date.now() + duration;
+    const defaults = { startVelocity: 25, spread: 360, ticks: 50, zIndex: 1000 };
+
+    function randomInRange(min, max) {
+      return Math.random() * (max - min) + min;
+    }
+
+    const interval = setInterval(function() {
+      const timeLeft = animationEnd - Date.now();
+
+      if (timeLeft <= 0) {
+        return clearInterval(interval);
+      }
+
+      const particleCount = 50 * (timeLeft / duration);
+      // Confetti burst from left and right corners
+      confetti(Object.assign({}, defaults, { particleCount, origin: { x: randomInRange(0.1, 0.3), y: Math.random() - 0.2 } }));
+      confetti(Object.assign({}, defaults, { particleCount, origin: { x: randomInRange(0.7, 0.9), y: Math.random() - 0.2 } }));
+    }, 250);
+  }
+}
+
+// Timer layout format
+function formatTimer(totalSeconds) {
+  const hrs = Math.floor(totalSeconds / 3600);
+  const mins = Math.floor((totalSeconds % 3600) / 60);
+  const secs = totalSeconds % 60;
+  return [
+    hrs.toString().padStart(2, '0'),
+    mins.toString().padStart(2, '0'),
+    secs.toString().padStart(2, '0')
+  ].join(':');
+}
+
+// Update Local Timer display
+function renderTimer() {
+  document.getElementById('roomTimer').innerText = formatTimer(state.timerSeconds);
+}
+
+// ==========================================================================
+// Event Handler Callbacks
+// ==========================================================================
+
+function setupEventListeners() {
+  // Join Form submit
+  document.getElementById('joinForm').addEventListener('submit', (e) => {
+    e.preventDefault();
+    state.username = document.getElementById('usernameInput').value.trim();
+    state.roomName = document.getElementById('roomInput').value.trim();
+    
+    if (state.username && state.roomName) {
+      // Save profile to localstorage
+      localStorage.setItem('poker_user_profile', JSON.stringify({ username: state.username }));
+      joinRoom();
+    }
+  });
+
+  // Random room name generator
+  document.getElementById('randomRoomBtn').addEventListener('click', generateRandomRoomName);
+
+  // Leave room button
+  document.getElementById('leaveRoomBtn').addEventListener('click', leaveRoom);
+
+  // Edit Story Button clicks
+  document.getElementById('editStoryBtn').addEventListener('click', showStoryEdit);
+  document.getElementById('saveStoryBtn').addEventListener('click', saveStoryEdit);
+  document.getElementById('cancelStoryBtn').addEventListener('click', cancelStoryEdit);
+  
+  // Allow edit submit on Enter key inside story text input
+  document.getElementById('storyInput').addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') {
+      saveStoryEdit();
+    } else if (e.key === 'Escape') {
+      cancelStoryEdit();
+    }
+  });
+
+  // Theme Toggle Switcher
+  document.getElementById('themeToggle').addEventListener('click', toggleTheme);
+
+  // Sidebar room control commands
+  document.getElementById('resetTimerBtn').addEventListener('click', () => sendRoomEvent('timer_reset'));
+  document.getElementById('clearVotesBtn').addEventListener('click', () => sendRoomEvent('clear_votes'));
+  document.getElementById('flipCardsBtn').addEventListener('click', () => sendRoomEvent('flip_cards'));
+  document.getElementById('skipStoryBtn').addEventListener('click', () => sendRoomEvent('skip_story'));
+
+  // Invite Accordion Toggle
+  document.getElementById('inviteAccordionToggle').addEventListener('click', toggleInviteAccordion);
+  
+  // Copy Invite link
+  document.getElementById('copyInviteLinkBtn').addEventListener('click', copyInviteLink);
+}
+
+// Toggle light/dark stylesheet themes
+function toggleTheme() {
+  const body = document.body;
+  const sunIcon = document.querySelector('.sun-icon');
+  const moonIcon = document.querySelector('.moon-icon');
+  
+  if (body.classList.contains('light-theme')) {
+    body.classList.replace('light-theme', 'dark-theme');
+    sunIcon.style.display = 'none';
+    moonIcon.style.display = 'block';
+    localStorage.setItem('poker_theme', 'dark');
+  } else {
+    body.classList.replace('dark-theme', 'light-theme');
+    sunIcon.style.display = 'block';
+    moonIcon.style.display = 'none';
+    localStorage.setItem('poker_theme', 'light');
+  }
+}
+
+// Set theme on load based on user cache preference
+(function applySavedTheme() {
+  const savedTheme = localStorage.getItem('poker_theme');
+  if (savedTheme === 'dark') {
+    document.addEventListener('DOMContentLoaded', () => {
+      document.body.classList.replace('light-theme', 'dark-theme');
+      document.querySelector('.sun-icon').style.display = 'none';
+      document.querySelector('.moon-icon').style.display = 'block';
+    });
+  }
+})();
+
+// Story label actions
+function showStoryEdit() {
+  document.getElementById('storyTitleWrapper').style.display = 'none';
+  document.getElementById('storyEditWrapper').style.display = 'flex';
+  document.getElementById('storyInput').value = state.currentStory;
+  document.getElementById('storyInput').focus();
+}
+
+function cancelStoryEdit() {
+  document.getElementById('storyTitleWrapper').style.display = 'flex';
+  document.getElementById('storyEditWrapper').style.display = 'none';
+}
+
+function saveStoryEdit() {
+  const newTitle = document.getElementById('storyInput').value.trim();
+  if (newTitle) {
+    sendRoomEvent('edit_story', { title: newTitle });
+  }
+  cancelStoryEdit();
+}
+
+// Invite teammates accordion toggle
+function toggleInviteAccordion() {
+  const toggle = document.getElementById('inviteAccordionToggle');
+  const content = document.getElementById('inviteAccordionContent');
+  state.isInviteOpen = !state.isInviteOpen;
+  
+  if (state.isInviteOpen) {
+    toggle.classList.add('open');
+    content.style.display = 'block';
+    // Focus invite URL link
+    document.getElementById('inviteLinkInput').select();
+  } else {
+    toggle.classList.remove('open');
+    content.style.display = 'none';
+  }
+}
+
+// Copy URL to Clipboard
+function copyInviteLink() {
+  const copyText = document.getElementById('inviteLinkInput');
+  copyText.select();
+  copyText.setSelectionRange(0, 99999); // Mobile compatibility
+  
+  navigator.clipboard.writeText(copyText.value).then(() => {
+    const copyBtn = document.getElementById('copyInviteLinkBtn');
+    const originalText = copyBtn.innerText;
+    copyBtn.innerText = 'Copied!';
+    copyBtn.style.backgroundColor = 'var(--accent-green)';
+    
+    setTimeout(() => {
+      copyBtn.innerText = originalText;
+      copyBtn.style.backgroundColor = 'var(--primary-color)';
+    }, 2000);
+  }).catch(err => {
+    console.error('Failed to copy text: ', err);
+  });
+}
+
+// Highlight cards in board deck
+function handleCardSelection(value) {
+  if (state.gameState === 'revealed') return; // Cannot change selection after reveal
+  
+  const cards = document.querySelectorAll('.poker-card-container');
+  let selected = false;
+  
+  cards.forEach(card => {
+    if (card.dataset.value === value) {
+      if (card.classList.contains('selected')) {
+        // Toggle off
+        card.classList.remove('selected');
+        state.currentVote = null;
+        state.voteTime = 0;
+      } else {
+        // Select
+        card.classList.add('selected');
+        state.currentVote = value;
+        state.voteTime = Math.round((Date.now() - state.voteTimerStart) / 1000);
+        selected = true;
+      }
+    } else {
+      card.classList.remove('selected');
+    }
+  });
+
+  // Update own record locally
+  state.players[state.userId].hasVoted = selected;
+  state.players[state.userId].vote = state.currentVote;
+  state.players[state.userId].timeToVote = state.voteTime;
+  
+  renderPlayersList();
+  updateStateBanner();
+  
+  // Publish vote status to room
+  sendRoomEvent('vote_status', {
+    hasVoted: selected,
+    vote: state.currentVote, // Simpler architecture: send vote value, masked in player-list UI until reveal
+    voteTime: state.voteTime
+  });
+}
+
+// ==========================================================================
+// MQTT Network & Room Collaboration Handler
+// ==========================================================================
+
+// Establish connection and subscribe to room
+function joinRoom() {
+  // Set room names
+  state.roomId = state.roomId || slugify(state.roomName) + '-' + Math.random().toString(36).substring(2, 6);
+  window.location.hash = `/room/${encodeURIComponent(state.roomId)}`;
+  
+  document.getElementById('roomTitleDisplay').innerText = state.roomName;
+  document.getElementById('storyTitleDisplay').innerText = state.currentStory;
+  
+  // Generate invite link URL
+  const inviteUrl = window.location.origin + window.location.pathname + window.location.hash;
+  document.getElementById('inviteLinkInput').value = inviteUrl;
+  
+  // Add room to recent localstorage cache
+  addRoomToHistory(state.roomName, state.roomId);
+  
+  // Initialize self details
+  state.players[state.userId] = {
+    name: state.username,
+    vote: null,
+    hasVoted: false,
+    status: 'online',
+    lastActive: Date.now(),
+    timeToVote: 0
+  };
+  
+  state.voteTimerStart = Date.now();
+  
+  // Display loading/connecting banner
+  updateConnectionStatus('connecting', 'Connecting...');
+  showScreen('boardScreen');
+  renderPlayersList();
+  updateStateBanner();
+  
+  // Connect to MQTT Broker
+  connectToBroker();
+}
+
+// Make a URL-safe room slug
+function slugify(text) {
+  return text.toString().toLowerCase()
+    .replace(/\s+/g, '-')           // Replace spaces with -
+    .replace(/[^\w\-]+/g, '')       // Remove all non-word chars
+    .replace(/\-\-+/g, '-')         // Replace multiple - with single -
+    .replace(/^-+/, '')             // Trim - from start
+    .replace(/-+$/, '');            // Trim - from end
+}
+
+// Save rooms inside Cache history
+function addRoomToHistory(name, id) {
+  let history = JSON.parse(localStorage.getItem('poker_room_history') || '[]');
+  // Avoid duplicates
+  history = history.filter(item => item.roomId !== id);
+  history.unshift({ roomName: name, roomId: id, timestamp: Date.now() });
+  localStorage.setItem('poker_room_history', JSON.stringify(history.slice(0, 10)));
+}
+
+// Try connecting to MQTT broker
+function connectToBroker() {
+  const brokerUrl = BROKERS[state.currentBrokerIndex];
+  console.log(`Attempting to connect to broker: ${brokerUrl}`);
+  
+  // Set a backup connection timeout
+  if (state.connectionTimeout) clearTimeout(state.connectionTimeout);
+  state.connectionTimeout = setTimeout(() => {
+    console.warn(`Connection timeout for broker ${brokerUrl}`);
+    handleConnectionFailure();
+  }, 7000); // Wait 7 seconds before failing over
+  
+  try {
+    const options = {
+      keepalive: 30,
+      clientId: 'poker_' + state.userId,
+      clean: true,
+      connectTimeout: 5000,
+      reconnectPeriod: 0 // We handle reconnecting ourselves manually
+    };
+    
+    state.mqttClient = mqtt.connect(brokerUrl, options);
+    
+    state.mqttClient.on('connect', () => {
+      clearTimeout(state.connectionTimeout);
+      state.isOfflineMode = false;
+      updateConnectionStatus('online', 'Connected');
+      console.log('Connected to MQTT broker successfully.');
+      
+      // Subscribe to room events topic
+      const topic = `planit-aesthetic/rooms/${state.roomId}`;
+      state.mqttClient.subscribe(topic, { qos: 1 }, (err) => {
+        if (err) {
+          console.error('Subscription error:', err);
+        } else {
+          // Announce arrival to room
+          sendRoomEvent('join', { name: state.username });
+          // Start presence timers
+          startPresenceHeartbeat();
+          startTimerProcess();
+        }
+      });
+    });
+    
+    state.mqttClient.on('message', (topic, message) => {
+      try {
+        const payload = JSON.parse(message.toString());
+        if (payload.senderId !== state.userId) {
+          handleIncomingEvent(payload);
+        }
+      } catch (e) {
+        console.error('Failed to parse incoming room payload message:', e);
+      }
+    });
+    
+    state.mqttClient.on('error', (err) => {
+      console.error('MQTT connection error:', err);
+      clearTimeout(state.connectionTimeout);
+      handleConnectionFailure();
+    });
+
+    state.mqttClient.on('close', () => {
+      console.log('MQTT connection closed');
+    });
+    
+  } catch (err) {
+    console.error('Error instantiating MQTT client:', err);
+    clearTimeout(state.connectionTimeout);
+    handleConnectionFailure();
+  }
+}
+
+// Failover to next broker or offline mode
+function handleConnectionFailure() {
+  if (state.mqttClient) {
+    try {
+      state.mqttClient.end(true);
+    } catch(e){}
+    state.mqttClient = null;
+  }
+  
+  state.currentBrokerIndex++;
+  if (state.currentBrokerIndex < BROKERS.length) {
+    console.log(`Retrying with fallback broker: ${BROKERS[state.currentBrokerIndex]}`);
+    connectToBroker();
+  } else {
+    // All brokers failed. Go to Offline Demo simulation mode!
+    activateOfflineMode();
+  }
+}
+
+// Activate Mock/Simulation offline demo play
+function activateOfflineMode() {
+  state.isOfflineMode = true;
+  updateConnectionStatus('offline', 'Demo Play (Offline)');
+  console.warn('Real-time connection failed. Activating mock offline simulation.');
+  
+  // Setup mock players to make application feel live
+  const mockNames = ['Alice (Dev)', 'Bob (QA)', 'Charlie (Product)'];
+  mockNames.forEach((name, idx) => {
+    const mockId = `mock_user_${idx}`;
+    state.players[mockId] = {
+      name: name,
+      vote: null,
+      hasVoted: false,
+      status: 'online',
+      lastActive: Date.now() + 100000000, // Never timeout
+      timeToVote: 0
+    };
+  });
+  
+  renderPlayersList();
+  updateStateBanner();
+  startTimerProcess();
+  
+  // Show an alert/tip to user
+  const tipBanner = document.createElement('div');
+  tipBanner.id = 'demoTipBanner';
+  tipBanner.style.cssText = 'background:var(--danger-light);color:var(--danger-color);padding:10px;text-align:center;font-size:0.85rem;font-weight:500;border-bottom:1px solid var(--border-color);';
+  tipBanner.innerHTML = '⚠️ Realtime servers unavailable. Running in <strong>Local Demo Mode</strong>. Open multiple tabs to collaborate is disabled, but you can play with AI teammates!';
+  document.body.insertBefore(tipBanner, document.querySelector('header').nextSibling);
+}
+
+// Update Header status indicator
+function updateConnectionStatus(status, text) {
+  const indicator = document.getElementById('connectionStatus');
+  indicator.className = `connection-status ${status}`;
+  indicator.querySelector('.status-text').innerText = text;
+}
+
+// Broadcast room events
+function sendRoomEvent(type, payload = {}) {
+  const event = {
+    senderId: state.userId,
+    senderName: state.username,
+    timestamp: Date.now(),
+    type: type,
+    ...payload
+  };
+
+  // If in offline mode, process own action locally and trigger mock responses
+  if (state.isOfflineMode) {
+    handleOfflineSimulationEvent(event);
+    return;
+  }
+  
+  // Process locally first for instant UI response in online mode
+  handleIncomingEvent(event);
+  
+  // If online, publish message
+  if (state.mqttClient && state.mqttClient.connected) {
+    const topic = `planit-aesthetic/rooms/${state.roomId}`;
+    state.mqttClient.publish(topic, JSON.stringify(event), { qos: 1 });
+  }
+}
+
+// Handle network events
+function handleIncomingEvent(event) {
+  const now = Date.now();
+  
+  switch(event.type) {
+    case 'join':
+      // New player joined
+      state.players[event.senderId] = {
+        name: event.senderName,
+        vote: null,
+        hasVoted: false,
+        status: 'online',
+        lastActive: now,
+        timeToVote: 0
+      };
+      console.log(`${event.senderName} joined the room.`);
+      renderPlayersList();
+      updateStateBanner();
+      
+      // Since we are already in the room, reply with our current status so they sync instantly (only if it wasn't ourselves joining)
+      if (event.senderId !== state.userId) {
+        sendRoomEvent('sync_state_reply', {
+          targetUserId: event.senderId,
+          username: state.username,
+          hasVoted: state.currentVote !== null,
+          vote: state.gameState === 'revealed' ? state.currentVote : null, // Only send card details if revealed
+          voteTime: state.voteTime,
+          gameState: state.gameState,
+          currentStory: state.currentStory,
+          timerSeconds: state.timerSeconds
+        });
+      }
+      break;
+      
+    case 'sync_state_reply':
+      // Reply received from existing room members
+      if (event.targetUserId === state.userId) {
+        state.players[event.senderId] = {
+          name: event.username,
+          vote: event.vote,
+          hasVoted: event.hasVoted,
+          status: 'online',
+          lastActive: now,
+          timeToVote: event.voteTime
+        };
+        
+        // Sync room state (story name, game mode, timer) from the oldest player in the room
+        if (event.gameState === 'revealed') {
+          state.gameState = 'revealed';
+        }
+        if (event.currentStory && state.currentStory === 'Estimate Task Description') {
+          state.currentStory = event.currentStory;
+          document.getElementById('storyTitleDisplay').innerText = state.currentStory;
+        }
+        
+        // Sync local timer if others have higher progress timer
+        if (event.timerSeconds > state.timerSeconds) {
+          state.timerSeconds = event.timerSeconds;
+          renderTimer();
+        }
+        
+        renderPlayersList();
+        updateStateBanner();
+        renderStats();
+      }
+      break;
+      
+    case 'ping':
+      // Periodic heartbeat
+      if (!state.players[event.senderId]) {
+        state.players[event.senderId] = { name: event.senderName };
+      }
+      state.players[event.senderId].name = event.senderName;
+      state.players[event.senderId].hasVoted = event.hasVoted;
+      state.players[event.senderId].vote = event.vote; // Will be null in voting, populated in revealed
+      state.players[event.senderId].timeToVote = event.voteTime;
+      state.players[event.senderId].status = 'online';
+      state.players[event.senderId].lastActive = now;
+      
+      renderPlayersList();
+      updateStateBanner();
+      break;
+      
+    case 'vote_status':
+      // Player changed vote
+      if (state.players[event.senderId]) {
+        state.players[event.senderId].hasVoted = event.hasVoted;
+        state.players[event.senderId].vote = event.vote;
+        state.players[event.senderId].timeToVote = event.voteTime;
+        state.players[event.senderId].lastActive = now;
+      }
+      renderPlayersList();
+      updateStateBanner();
+      break;
+      
+    case 'flip_cards':
+      // Flip deck revealed
+      state.gameState = 'revealed';
+      renderPlayersList();
+      updateStateBanner();
+      renderStats();
+      break;
+      
+    case 'clear_votes':
+      // Clear estimates
+      resetVotingStateLocally();
+      break;
+      
+    case 'skip_story':
+      // Advance room story estimate
+      resetVotingStateLocally();
+      // Increment or default story description
+      state.currentStory = 'Next Estimating Story';
+      document.getElementById('storyTitleDisplay').innerText = state.currentStory;
+      state.timerSeconds = 0;
+      renderTimer();
+      break;
+      
+    case 'edit_story':
+      // Story label name edit
+      state.currentStory = event.title;
+      document.getElementById('storyTitleDisplay').innerText = state.currentStory;
+      break;
+      
+    case 'timer_reset':
+      // Reset timer
+      state.timerSeconds = 0;
+      renderTimer();
+      break;
+      
+    case 'timer_sync':
+      // Sync clock timer from oldest user (timer master)
+      // Only accept if we are not the timer host ourselves
+      if (!state.isTimerHost) {
+        state.timerSeconds = event.seconds;
+        renderTimer();
+      }
+      break;
+  }
+}
+
+// Reset variables locally
+function resetVotingStateLocally() {
+  state.gameState = 'voting';
+  state.currentVote = null;
+  state.voteTime = 0;
+  state.voteTimerStart = Date.now();
+  
+  // Clear CSS selections
+  document.querySelectorAll('.poker-card-container').forEach(card => {
+    card.classList.remove('selected');
+  });
+  
+  // Clear all player votes
+  Object.keys(state.players).forEach(id => {
+    state.players[id].vote = null;
+    state.players[id].hasVoted = false;
+    state.players[id].timeToVote = 0;
+  });
+  
+  renderPlayersList();
+  updateStateBanner();
+  renderStats();
+}
+
+// Heartbeat background loop
+function startPresenceHeartbeat() {
+  // Send own ping immediately
+  sendPing();
+  
+  // Set intervals
+  setInterval(() => {
+    if (state.mqttClient && state.mqttClient.connected) {
+      sendPing();
+    }
+  }, 5000);
+  
+  // Check online status of peers
+  setInterval(() => {
+    const now = Date.now();
+    let changed = false;
+    
+    Object.keys(state.players).forEach(id => {
+      if (id === state.userId) return; // Skip self
+      
+      const player = state.players[id];
+      // Skip simulated players in offline mode
+      if (state.isOfflineMode && id.startsWith('mock_user_')) return;
+      
+      if (player.status === 'online' && now - player.lastActive > 12000) {
+        player.status = 'offline';
+        changed = true;
+      }
+      
+      if (now - player.lastActive > 20000) {
+        delete state.players[id];
+        changed = true;
+        console.log(`Player ${player.name} timed out and was removed.`);
+      }
+    });
+    
+    if (changed) {
+      renderPlayersList();
+      updateStateBanner();
+      renderStats();
+    }
+  }, 2000);
+}
+
+function sendPing() {
+  sendRoomEvent('ping', {
+    hasVoted: state.currentVote !== null,
+    vote: state.currentVote,
+    voteTime: state.voteTime
+  });
+}
+
+// Stopwatch loop
+function startTimerProcess() {
+  if (state.timerInterval) clearInterval(state.timerInterval);
+  
+  state.timerInterval = setInterval(() => {
+    // Determine if we should maintain/broadcast the timer:
+    // We are the timer master if we are the oldest player online in our list.
+    const sortedUserIds = Object.keys(state.players).sort();
+    state.isTimerHost = sortedUserIds[0] === state.userId;
+    
+    if (state.isTimerHost || state.isOfflineMode) {
+      state.timerSeconds++;
+      renderTimer();
+      
+      // Broadcast timer sync online
+      if (!state.isOfflineMode && state.timerSeconds % 2 === 0) {
+        sendRoomEvent('timer_sync', { seconds: state.timerSeconds });
+      }
+    }
+  }, 1000);
+}
+
+// Leave room return to welcome screen
+function leaveRoom() {
+  if (state.timerInterval) {
+    clearInterval(state.timerInterval);
+    state.timerInterval = null;
+  }
+  
+  if (state.mqttClient) {
+    try {
+      // Broadcast leave notice if possible
+      state.mqttClient.end(true);
+    } catch(e) {}
+    state.mqttClient = null;
+  }
+  
+  // Clear tip banner if any
+  const tip = document.getElementById('demoTipBanner');
+  if (tip) tip.remove();
+  
+  // Reset states
+  state.players = {};
+  state.roomId = '';
+  state.roomName = '';
+  state.currentVote = null;
+  state.gameState = 'voting';
+  state.timerSeconds = 0;
+  
+  // Reset card grid selections
+  document.querySelectorAll('.poker-card-container').forEach(card => {
+    card.classList.remove('selected');
+  });
+
+  window.location.hash = '';
+  showScreen('welcomeScreen');
+  renderRecentRooms();
+  generateRandomRoomName();
+}
+
+// ==========================================================================
+// Offline Mode Mock/AI Players Simulation Engine
+// ==========================================================================
+
+function handleOfflineSimulationEvent(event) {
+  console.log('Processing offline event:', event);
+  const now = Date.now();
+  
+  switch(event.type) {
+    case 'vote_status':
+      // The user voted or unvoted
+      state.players[state.userId].hasVoted = event.hasVoted;
+      state.players[state.userId].vote = event.vote;
+      state.players[state.userId].timeToVote = event.voteTime;
+      
+      renderPlayersList();
+      updateStateBanner();
+      
+      // Trigger simulated voters after 1-3 seconds
+      if (event.hasVoted) {
+        Object.keys(state.players).forEach(id => {
+          if (id === state.userId) return;
+          const player = state.players[id];
+          if (!player.hasVoted) {
+            const delay = 1000 + Math.random() * 2000;
+            setTimeout(() => {
+              // Ensure we are still in voting state
+              if (state.gameState === 'voting') {
+                player.hasVoted = true;
+                // Generate a reasonable planning poker value (bias towards 3, 5, 8)
+                const mockWeights = ['1', '2', '3', '3', '5', '5', '5', '8', '8', '13', '?', 'C'];
+                // Wait, DECK_VALUES in screenshot are 0-10, ?, C. Let's bias weights for it:
+                const screenshotWeights = ['1', '2', '3', '3', '5', '5', '5', '8', '8', '10', '?', 'C'];
+                const selectedVal = screenshotWeights[Math.floor(Math.random() * screenshotWeights.length)];
+                player.vote = selectedVal;
+                player.timeToVote = Math.round((Date.now() - state.voteTimerStart) / 1000);
+                
+                renderPlayersList();
+                updateStateBanner();
+              }
+            }, delay);
+          }
+        });
+      }
+      break;
+      
+    case 'flip_cards':
+      state.gameState = 'revealed';
+      // Force all mock players to vote if they haven't yet, so we have stats
+      Object.keys(state.players).forEach(id => {
+        if (id === state.userId) return;
+        const player = state.players[id];
+        if (!player.hasVoted) {
+          player.hasVoted = true;
+          player.vote = '5'; // Default mock vote
+          player.timeToVote = 2;
+        }
+      });
+      renderPlayersList();
+      updateStateBanner();
+      renderStats();
+      break;
+      
+    case 'clear_votes':
+      resetVotingStateLocally();
+      break;
+      
+    case 'skip_story':
+      resetVotingStateLocally();
+      state.currentStory = 'Next Estimating Story';
+      document.getElementById('storyTitleDisplay').innerText = state.currentStory;
+      state.timerSeconds = 0;
+      renderTimer();
+      break;
+      
+    case 'edit_story':
+      state.currentStory = event.title;
+      document.getElementById('storyTitleDisplay').innerText = state.currentStory;
+      break;
+      
+    case 'timer_reset':
+      state.timerSeconds = 0;
+      renderTimer();
+      break;
+  }
+}
