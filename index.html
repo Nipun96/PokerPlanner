@@ -140,6 +140,25 @@
             </div>
           </div>
 
+          <!-- Deck Controls (Template Dropdown) -->
+          <div class="deck-controls-bar">
+            <div class="template-selector-wrapper">
+              <label for="deckTemplateSelect" class="control-label">Card Format</label>
+              <div class="select-wrapper">
+                <select id="deckTemplateSelect" class="select-dropdown">
+                  <option value="sequential">Sequential (0 - 10)</option>
+                  <option value="fibonacci">Fibonacci (0, 1, 2, 3, 5, 8, 13, ...)</option>
+                  <option value="modified_fibonacci">Modified Fibonacci (0, 0.5, 1, 2, ...)</option>
+                  <option value="tshirt">T-Shirt Size (XXS, XS, S, M, L, XL, XXL)</option>
+                  <option value="powers_of_2">Powers of 2 (0, 1, 2, 4, 8, 16, ...)</option>
+                </select>
+                <svg class="select-chevron" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                  <polyline points="6 9 12 15 18 9"></polyline>
+                </svg>
+              </div>
+            </div>
+          </div>
+
           <!-- Cards Grid -->
           <div id="deckGrid" class="cards-grid">
             <!-- Cards will be populated dynamically -->
