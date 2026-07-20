@@ -22,32 +22,38 @@ const state = {
   // User Profile
   username: '',
   userId: '',
-  
+
   // Room Status
   roomName: '',
   roomId: '',
   currentStory: 'Estimate Task Description',
   gameState: 'voting', // 'voting' | 'revealed'
-  
+
   // Timer State
   timerSeconds: 0,
   timerInterval: null,
+  heartbeatInterval: null,
+  presenceCheckInterval: null,
   isTimerHost: false, // The oldest online user maintains/broadcasts the timer
-  
+
   // Players (Real and Simulated)
   players: {}, // Map of userId -> player details
-  
+
   // Local User Selection
   currentVote: null,
   voteTime: 0, // Time when local user voted
   voteTimerStart: 0,
-  
+
   // Connection and Mode
   mqttClient: null,
   currentBrokerIndex: 0,
   isOfflineMode: false,
   connectionTimeout: null,
-  
+
+  // Card templates state
+  deckType: 'sequential',
+  deckValues: ['0', '1', '2', '3', '4', '5', '6', '7', '8', '9', '10', '?', 'C'],
+
   // UI Accordion State
   isInviteOpen: false
 };
@@ -90,10 +96,10 @@ function initRouting() {
     const roomId = decodeURIComponent(hash.substring(7));
     state.roomId = roomId;
     state.roomName = roomId.split('-')[0] || roomId; // Extract room title
-    
+
     // Fill the room input
     document.getElementById('roomInput').value = state.roomName;
-    
+
     // If username is cached, auto-join, otherwise wait for submit
     if (state.username) {
       joinRoom();
@@ -114,7 +120,7 @@ function generateRandomRoomName() {
   const adj = adjs[Math.floor(Math.random() * adjs.length)];
   const noun = nouns[Math.floor(Math.random() * nouns.length)];
   const num = Math.floor(100 + Math.random() * 900);
-  
+
   const randomName = `${adj}-${noun}-${num}`;
   document.getElementById('roomInput').value = randomName;
 }
@@ -136,20 +142,64 @@ function showScreen(screenId) {
   }
 }
 
+// Card template choices mapping
+const DECK_TEMPLATES = {
+  sequential: ['0', '1', '2', '3', '4', '5', '6', '7', '8', '9', '10', '?', 'C'],
+  fibonacci: ['0', '1', '2', '3', '5', '8', '13', '21', '34', '55', '89', '?', 'C'],
+  modified_fibonacci: ['0', '0.5', '1', '2', '3', '5', '8', '13', '20', '40', '100', '?', 'C'],
+  tshirt: ['XXS', 'XS', 'S', 'M', 'L', 'XL', 'XXL', '?', 'C'],
+  powers_of_2: ['0', '1', '2', '4', '8', '16', '32', '64', '?', 'C'],
+  custom1: ['0.5', '1.', '1.5', '2', '2.5', '3', '3.5', '4', '4.5', '5', '5.5', '?', 'C']
+};
+
+function updateDeckValues(deckType) {
+  state.deckType = deckType || 'sequential';
+  state.deckValues = DECK_TEMPLATES[state.deckType] || DECK_TEMPLATES.sequential;
+}
+
+// Local Inactivity Session Expiry (15 minutes)
+let localActivityTimeout = null;
+
+function resetLocalActivityTimer() {
+  if (localActivityTimeout) clearTimeout(localActivityTimeout);
+  if (state.roomId) {
+    localActivityTimeout = setTimeout(() => {
+      alert("Your session has expired due to 15 minutes of inactivity.");
+      leaveRoom();
+    }, 15 * 60 * 1000); // 15 minutes
+  }
+}
+
+function setupLocalActivityTracking() {
+  const events = ['mousemove', 'keypress', 'click', 'scroll', 'touchstart'];
+  events.forEach(evt => {
+    window.addEventListener(evt, resetLocalActivityTimer);
+  });
+  resetLocalActivityTimer();
+}
+
+function destroyLocalActivityTracking() {
+  if (localActivityTimeout) clearTimeout(localActivityTimeout);
+  const events = ['mousemove', 'keypress', 'click', 'scroll', 'touchstart'];
+  events.forEach(evt => {
+    window.removeEventListener(evt, resetLocalActivityTimer);
+  });
+}
+
 // ==========================================================================
 // UI Rendering Functions
 // ==========================================================================
 
-// Render the 13 card deck
+// Render the card deck
 function renderDeck() {
   const grid = document.getElementById('deckGrid');
   grid.innerHTML = '';
-  
-  DECK_VALUES.forEach((val, idx) => {
+
+  state.deckValues.forEach((val, idx) => {
     const card = document.createElement('div');
     card.className = 'poker-card-container';
     card.dataset.value = val;
-    
+
     // Determine card value content
     let centerValue = val;
     if (val === 'C') {
@@ -174,7 +224,7 @@ function renderDeck() {
         </div>
       </div>
     `;
-    
+
     card.addEventListener('click', () => handleCardSelection(val));
     grid.appendChild(card);
   });
@@ -184,20 +234,20 @@ function renderDeck() {
 function renderPlayersList() {
   const list = document.getElementById('playersList');
   list.innerHTML = '';
-  
+
   const sortedUserIds = Object.keys(state.players).sort();
-  
+
   sortedUserIds.forEach(id => {
     const player = state.players[id];
     const isMe = id === state.userId;
     const hasVoted = player.hasVoted;
-    
+
     const li = document.createElement('li');
     li.className = `player-row ${isMe ? 'me' : ''}`;
-    
+
     // Initial letter for avatar
     const initial = (player.name || '?').substring(0, 2);
-    
+
     // Format timer value
     const voteTimeStr = player.timeToVote > 0 ? formatTimer(player.timeToVote) : '';
 
@@ -246,7 +296,7 @@ function renderPlayersList() {
         ${rightStatusHTML}
       </div>
     `;
-    
+
     list.appendChild(li);
   });
 }
@@ -256,29 +306,29 @@ function renderRecentRooms() {
   const history = JSON.parse(localStorage.getItem('poker_room_history') || '[]');
   const list = document.getElementById('recentRoomsList');
   const section = document.getElementById('recentRoomsSection');
-  
+
   if (history.length === 0) {
     section.style.display = 'none';
     return;
   }
-  
+
   section.style.display = 'block';
   list.innerHTML = '';
-  
+
   // Show last 5 rooms
   history.slice(0, 5).forEach(item => {
     const li = document.createElement('li');
     li.className = 'recent-room-item';
-    
+
     // Format timestamp
     const date = new Date(item.timestamp);
     const dateStr = date.toLocaleDateString() + ' ' + date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-    
+
     li.innerHTML = `
       <span class="recent-room-name">${item.roomName}</span>
       <span class="recent-room-time">${dateStr}</span>
     `;
-    
+
     li.addEventListener('click', () => {
       document.getElementById('roomInput').value = item.roomName;
       if (state.username) {
@@ -288,7 +338,7 @@ function renderRecentRooms() {
         document.getElementById('usernameInput').focus();
       }
     });
-    
+
     list.appendChild(li);
   });
 }
@@ -296,14 +346,14 @@ function renderRecentRooms() {
 // Update the game state banner in sidebar
 function updateStateBanner() {
   const banner = document.getElementById('gameStateIndicator');
-  
+
   if (state.gameState === 'voting') {
     // Count players voted
     const totalPlayers = Object.keys(state.players).length;
     const votedCount = Object.values(state.players).filter(p => p.hasVoted).length;
-    
+
     banner.className = 'state-banner state-waiting';
-    
+
     if (votedCount === 0) {
       banner.innerText = 'Waiting for votes';
     } else if (votedCount < totalPlayers) {
@@ -311,7 +361,7 @@ function updateStateBanner() {
       const missing = Object.values(state.players)
         .filter(p => !p.hasVoted)
         .map(p => p.name);
-      
+
       if (missing.length === 1) {
         banner.innerText = `Waiting for ${missing[0]} to vote`;
       } else {
@@ -329,59 +379,91 @@ function updateStateBanner() {
 // Calculate and render estimate statistics
 function renderStats() {
   const panel = document.getElementById('statsPanel');
-  
+  const deck = document.getElementById('deckGrid');
+
   if (state.gameState === 'voting') {
     panel.style.display = 'none';
+    deck.style.display = 'grid';
     return;
   }
-  
+
+  // Revealed state
+  deck.style.display = 'none';
+  panel.style.display = 'block';
+
   const votes = Object.values(state.players)
     .map(p => p.vote)
     .filter(v => v !== null && v !== undefined && v !== '');
-  
+
   if (votes.length === 0) {
-    panel.style.display = 'none';
+    document.getElementById('statAverage').innerText = '-';
+    document.getElementById('statMedian').innerText = '-';
+    document.getElementById('statRange').innerText = '-';
+    document.getElementById('statAgreement').innerText = '0%';
+    document.getElementById('distributionBarChart').innerHTML = '<div style="color:var(--text-secondary);font-size:0.9rem;padding:10px 0;">No votes recorded</div>';
     return;
   }
-  
-  panel.style.display = 'block';
-  
-  // Calculate average and median (ignore non-numeric cards like '?' and 'C')
-  const numericVotes = votes
-    .map(v => parseFloat(v))
-    .filter(v => !isNaN(v))
-    .sort((a, b) => a - b);
-  
+
+  // Determine if current deck values are numeric (ignoring '?' and 'C')
+  const isNumericDeck = state.deckValues
+    .filter(v => v !== '?' && v !== 'C')
+    .every(v => !isNaN(parseFloat(v)));
+
   let average = '-';
   let median = '-';
   let voteRange = '-';
-  
-  if (numericVotes.length > 0) {
-    // Average
-    const sum = numericVotes.reduce((acc, curr) => acc + curr, 0);
-    average = (sum / numericVotes.length).toFixed(1);
-    
-    // Median
-    const mid = Math.floor(numericVotes.length / 2);
-    if (numericVotes.length % 2 === 0) {
-      median = ((numericVotes[mid - 1] + numericVotes[mid]) / 2).toFixed(1);
-    } else {
-      median = numericVotes[mid].toString();
+
+  if (isNumericDeck) {
+    const numericVotes = votes
+      .map(v => parseFloat(v))
+      .filter(v => !isNaN(v))
+      .sort((a, b) => a - b);
+
+    if (numericVotes.length > 0) {
+      // Average
+      const sum = numericVotes.reduce((acc, curr) => acc + curr, 0);
+      average = (sum / numericVotes.length).toFixed(1);
+
+      // Median
+      const mid = Math.floor(numericVotes.length / 2);
+      if (numericVotes.length % 2 === 0) {
+        median = ((numericVotes[mid - 1] + numericVotes[mid]) / 2).toFixed(1);
+      } else {
+        median = numericVotes[mid].toString();
+      }
+
+      // Range
+      const min = numericVotes[0];
+      const max = numericVotes[numericVotes.length - 1];
+      voteRange = min === max ? min.toString() : `${min} - ${max}`;
     }
-    
-    // Range
-    const min = numericVotes[0];
-    const max = numericVotes[numericVotes.length - 1];
-    voteRange = min === max ? min.toString() : `${min} - ${max}`;
+  } else {
+    // Non-numeric (T-Shirt Size, etc.)
+    const validVotes = votes
+      .filter(v => v !== '?' && v !== 'C')
+      .sort((a, b) => {
+        return state.deckValues.indexOf(a) - state.deckValues.indexOf(b);
+      });
+
+    if (validVotes.length > 0) {
+      // Median
+      const mid = Math.floor(validVotes.length / 2);
+      median = validVotes[mid];
+
+      // Range
+      const min = validVotes[0];
+      const max = validVotes[validVotes.length - 1];
+      voteRange = min === max ? min : `${min} - ${max}`;
+    }
   }
-  
+
   // Agreement percentage
   // Find highest frequency count of any vote
   const freqMap = {};
   votes.forEach(v => {
     freqMap[v] = (freqMap[v] || 0) + 1;
   });
-  
+
   let maxFreq = 0;
   let consensusValue = null;
   Object.keys(freqMap).forEach(v => {
@@ -390,30 +472,30 @@ function renderStats() {
       consensusValue = v;
     }
   });
-  
+
   const agreement = Math.round((maxFreq / votes.length) * 100);
-  
+
   // Populate UI
   document.getElementById('statAverage').innerText = average;
   document.getElementById('statMedian').innerText = median;
   document.getElementById('statRange').innerText = voteRange;
   document.getElementById('statAgreement').innerText = `${agreement}%`;
-  
+
   // Render distribution chart
   const chartContainer = document.getElementById('distributionBarChart');
   chartContainer.innerHTML = '';
-  
+
   // Sort keys based on our custom deck sorting
   const sortedVoteKeys = Object.keys(freqMap).sort((a, b) => {
-    return DECK_VALUES.indexOf(a) - DECK_VALUES.indexOf(b);
+    return state.deckValues.indexOf(a) - state.deckValues.indexOf(b);
   });
-  
+
   sortedVoteKeys.forEach(voteVal => {
     const count = freqMap[voteVal];
     const percentage = Math.round((count / votes.length) * 100);
     const row = document.createElement('div');
     row.className = 'chart-row';
-    
+
     row.innerHTML = `
       <span class="chart-value-label">${voteVal === 'C' ? '☕' : voteVal}</span>
       <div class="chart-bar-container">
@@ -423,7 +505,7 @@ function renderStats() {
     `;
     chartContainer.appendChild(row);
   });
-  
+
   // Trigger confetti if consensus is 100% agreement and at least 2 real votes
   if (agreement === 100 && votes.length >= 2 && consensusValue !== '?' && consensusValue !== 'C') {
     triggerConfetti();
@@ -441,7 +523,7 @@ function triggerConfetti() {
       return Math.random() * (max - min) + min;
     }
 
-    const interval = setInterval(function() {
+    const interval = setInterval(function () {
       const timeLeft = animationEnd - Date.now();
 
       if (timeLeft <= 0) {
@@ -483,7 +565,7 @@ function setupEventListeners() {
     e.preventDefault();
     state.username = document.getElementById('usernameInput').value.trim();
     state.roomName = document.getElementById('roomInput').value.trim();
-    
+
     if (state.username && state.roomName) {
       // Save profile to localstorage
       localStorage.setItem('poker_user_profile', JSON.stringify({ username: state.username }));
@@ -501,7 +583,7 @@ function setupEventListeners() {
   document.getElementById('editStoryBtn').addEventListener('click', showStoryEdit);
   document.getElementById('saveStoryBtn').addEventListener('click', saveStoryEdit);
   document.getElementById('cancelStoryBtn').addEventListener('click', cancelStoryEdit);
-  
+
   // Allow edit submit on Enter key inside story text input
   document.getElementById('storyInput').addEventListener('keydown', (e) => {
     if (e.key === 'Enter') {
@@ -522,9 +604,14 @@ function setupEventListeners() {
 
   // Invite Accordion Toggle
   document.getElementById('inviteAccordionToggle').addEventListener('click', toggleInviteAccordion);
-  
+
   // Copy Invite link
   document.getElementById('copyInviteLinkBtn').addEventListener('click', copyInviteLink);
+
+  // Deck template change dropdown select
+  document.getElementById('deckTemplateSelect').addEventListener('change', (e) => {
+    sendRoomEvent('change_template', { deckType: e.target.value });
+  });
 }
 
 // Toggle light/dark stylesheet themes
@@ -532,7 +619,7 @@ function toggleTheme() {
   const body = document.body;
   const sunIcon = document.querySelector('.sun-icon');
   const moonIcon = document.querySelector('.moon-icon');
-  
+
   if (body.classList.contains('light-theme')) {
     body.classList.replace('light-theme', 'dark-theme');
     sunIcon.style.display = 'none';
@@ -584,7 +671,7 @@ function toggleInviteAccordion() {
   const toggle = document.getElementById('inviteAccordionToggle');
   const content = document.getElementById('inviteAccordionContent');
   state.isInviteOpen = !state.isInviteOpen;
-  
+
   if (state.isInviteOpen) {
     toggle.classList.add('open');
     content.style.display = 'block';
@@ -601,13 +688,13 @@ function copyInviteLink() {
   const copyText = document.getElementById('inviteLinkInput');
   copyText.select();
   copyText.setSelectionRange(0, 99999); // Mobile compatibility
-  
+
   navigator.clipboard.writeText(copyText.value).then(() => {
     const copyBtn = document.getElementById('copyInviteLinkBtn');
     const originalText = copyBtn.innerText;
     copyBtn.innerText = 'Copied!';
     copyBtn.style.backgroundColor = 'var(--accent-green)';
-    
+
     setTimeout(() => {
       copyBtn.innerText = originalText;
       copyBtn.style.backgroundColor = 'var(--primary-color)';
@@ -620,10 +707,10 @@ function copyInviteLink() {
 // Highlight cards in board deck
 function handleCardSelection(value) {
   if (state.gameState === 'revealed') return; // Cannot change selection after reveal
-  
+
   const cards = document.querySelectorAll('.poker-card-container');
   let selected = false;
-  
+
   cards.forEach(card => {
     if (card.dataset.value === value) {
       if (card.classList.contains('selected')) {
@@ -647,10 +734,10 @@ function handleCardSelection(value) {
   state.players[state.userId].hasVoted = selected;
   state.players[state.userId].vote = state.currentVote;
   state.players[state.userId].timeToVote = state.voteTime;
-  
+
   renderPlayersList();
   updateStateBanner();
-  
+
   // Publish vote status to room
   sendRoomEvent('vote_status', {
     hasVoted: selected,
@@ -668,17 +755,17 @@ function joinRoom() {
   // Set room names
   state.roomId = state.roomId || slugify(state.roomName) + '-' + Math.random().toString(36).substring(2, 6);
   window.location.hash = `/room/${encodeURIComponent(state.roomId)}`;
-  
+
   document.getElementById('roomTitleDisplay').innerText = state.roomName;
   document.getElementById('storyTitleDisplay').innerText = state.currentStory;
-  
+
   // Generate invite link URL
   const inviteUrl = window.location.origin + window.location.pathname + window.location.hash;
   document.getElementById('inviteLinkInput').value = inviteUrl;
-  
+
   // Add room to recent localstorage cache
   addRoomToHistory(state.roomName, state.roomId);
-  
+
   // Initialize self details
   state.players[state.userId] = {
     name: state.username,
@@ -688,15 +775,16 @@ function joinRoom() {
     lastActive: Date.now(),
     timeToVote: 0
   };
-  
+
   state.voteTimerStart = Date.now();
-  
+
   // Display loading/connecting banner
   updateConnectionStatus('connecting', 'Connecting...');
   showScreen('boardScreen');
+  setupLocalActivityTracking();
   renderPlayersList();
   updateStateBanner();
-  
+
   // Connect to MQTT Broker
   connectToBroker();
 }
@@ -724,14 +812,14 @@ function addRoomToHistory(name, id) {
 function connectToBroker() {
   const brokerUrl = BROKERS[state.currentBrokerIndex];
   console.log(`Attempting to connect to broker: ${brokerUrl}`);
-  
+
   // Set a backup connection timeout
   if (state.connectionTimeout) clearTimeout(state.connectionTimeout);
   state.connectionTimeout = setTimeout(() => {
     console.warn(`Connection timeout for broker ${brokerUrl}`);
     handleConnectionFailure();
   }, 7000); // Wait 7 seconds before failing over
-  
+
   try {
     const options = {
       keepalive: 30,
@@ -740,15 +828,15 @@ function connectToBroker() {
       connectTimeout: 5000,
       reconnectPeriod: 0 // We handle reconnecting ourselves manually
     };
-    
+
     state.mqttClient = mqtt.connect(brokerUrl, options);
-    
+
     state.mqttClient.on('connect', () => {
       clearTimeout(state.connectionTimeout);
       state.isOfflineMode = false;
       updateConnectionStatus('online', 'Connected');
       console.log('Connected to MQTT broker successfully.');
-      
+
       // Subscribe to room events topic
       const topic = `planit-aesthetic/rooms/${state.roomId}`;
       state.mqttClient.subscribe(topic, { qos: 1 }, (err) => {
@@ -763,7 +851,7 @@ function connectToBroker() {
         }
       });
     });
-    
+
     state.mqttClient.on('message', (topic, message) => {
       try {
         const payload = JSON.parse(message.toString());
@@ -774,7 +862,7 @@ function connectToBroker() {
         console.error('Failed to parse incoming room payload message:', e);
       }
     });
-    
+
     state.mqttClient.on('error', (err) => {
       console.error('MQTT connection error:', err);
       clearTimeout(state.connectionTimeout);
@@ -784,7 +872,7 @@ function connectToBroker() {
     state.mqttClient.on('close', () => {
       console.log('MQTT connection closed');
     });
-    
+
   } catch (err) {
     console.error('Error instantiating MQTT client:', err);
     clearTimeout(state.connectionTimeout);
@@ -797,10 +885,10 @@ function handleConnectionFailure() {
   if (state.mqttClient) {
     try {
       state.mqttClient.end(true);
-    } catch(e){}
+    } catch (e) { }
     state.mqttClient = null;
   }
-  
+
   state.currentBrokerIndex++;
   if (state.currentBrokerIndex < BROKERS.length) {
     console.log(`Retrying with fallback broker: ${BROKERS[state.currentBrokerIndex]}`);
@@ -816,7 +904,7 @@ function activateOfflineMode() {
   state.isOfflineMode = true;
   updateConnectionStatus('offline', 'Demo Play (Offline)');
   console.warn('Real-time connection failed. Activating mock offline simulation.');
-  
+
   // Setup mock players to make application feel live
   const mockNames = ['Alice (Dev)', 'Bob (QA)', 'Charlie (Product)'];
   mockNames.forEach((name, idx) => {
@@ -830,11 +918,11 @@ function activateOfflineMode() {
       timeToVote: 0
     };
   });
-  
+
   renderPlayersList();
   updateStateBanner();
   startTimerProcess();
-  
+
   // Show an alert/tip to user
   const tipBanner = document.createElement('div');
   tipBanner.id = 'demoTipBanner';
@@ -865,10 +953,10 @@ function sendRoomEvent(type, payload = {}) {
     handleOfflineSimulationEvent(event);
     return;
   }
-  
+
   // Process locally first for instant UI response in online mode
   handleIncomingEvent(event);
-  
+
   // If online, publish message
   if (state.mqttClient && state.mqttClient.connected) {
     const topic = `planit-aesthetic/rooms/${state.roomId}`;
@@ -879,8 +967,8 @@ function sendRoomEvent(type, payload = {}) {
 // Handle network events
 function handleIncomingEvent(event) {
   const now = Date.now();
-  
-  switch(event.type) {
+
+  switch (event.type) {
     case 'join':
       // New player joined
       state.players[event.senderId] = {
@@ -894,7 +982,7 @@ function handleIncomingEvent(event) {
       console.log(`${event.senderName} joined the room.`);
       renderPlayersList();
       updateStateBanner();
-      
+
       // Since we are already in the room, reply with our current status so they sync instantly (only if it wasn't ourselves joining)
       if (event.senderId !== state.userId) {
         sendRoomEvent('sync_state_reply', {
@@ -905,11 +993,12 @@ function handleIncomingEvent(event) {
           voteTime: state.voteTime,
           gameState: state.gameState,
           currentStory: state.currentStory,
-          timerSeconds: state.timerSeconds
+          timerSeconds: state.timerSeconds,
+          deckType: state.deckType
         });
       }
       break;
-      
+
     case 'sync_state_reply':
       // Reply received from existing room members
       if (event.targetUserId === state.userId) {
@@ -921,7 +1010,7 @@ function handleIncomingEvent(event) {
           lastActive: now,
           timeToVote: event.voteTime
         };
-        
+
         // Sync room state (story name, game mode, timer) from the oldest player in the room
         if (event.gameState === 'revealed') {
           state.gameState = 'revealed';
@@ -930,19 +1019,29 @@ function handleIncomingEvent(event) {
           state.currentStory = event.currentStory;
           document.getElementById('storyTitleDisplay').innerText = state.currentStory;
         }
-        
+
+        // Sync active template from existing members
+        if (event.deckType && state.deckType !== event.deckType) {
+          updateDeckValues(event.deckType);
+          renderDeck();
+          const templateSelect = document.getElementById('deckTemplateSelect');
+          if (templateSelect) {
+            templateSelect.value = event.deckType;
+          }
+        }
+
         // Sync local timer if others have higher progress timer
         if (event.timerSeconds > state.timerSeconds) {
           state.timerSeconds = event.timerSeconds;
           renderTimer();
         }
-        
+
         renderPlayersList();
         updateStateBanner();
         renderStats();
       }
       break;
-      
+
     case 'ping':
       // Periodic heartbeat
       if (!state.players[event.senderId]) {
@@ -954,11 +1053,11 @@ function handleIncomingEvent(event) {
       state.players[event.senderId].timeToVote = event.voteTime;
       state.players[event.senderId].status = 'online';
       state.players[event.senderId].lastActive = now;
-      
+
       renderPlayersList();
       updateStateBanner();
       break;
-      
+
     case 'vote_status':
       // Player changed vote
       if (state.players[event.senderId]) {
@@ -970,7 +1069,7 @@ function handleIncomingEvent(event) {
       renderPlayersList();
       updateStateBanner();
       break;
-      
+
     case 'flip_cards':
       // Flip deck revealed
       state.gameState = 'revealed';
@@ -978,12 +1077,12 @@ function handleIncomingEvent(event) {
       updateStateBanner();
       renderStats();
       break;
-      
+
     case 'clear_votes':
       // Clear estimates
       resetVotingStateLocally();
       break;
-      
+
     case 'skip_story':
       // Advance room story estimate
       resetVotingStateLocally();
@@ -993,19 +1092,30 @@ function handleIncomingEvent(event) {
       state.timerSeconds = 0;
       renderTimer();
       break;
-      
+
     case 'edit_story':
       // Story label name edit
       state.currentStory = event.title;
       document.getElementById('storyTitleDisplay').innerText = state.currentStory;
       break;
-      
+
+    case 'change_template':
+      // Change deck template format
+      updateDeckValues(event.deckType);
+      renderDeck();
+      const templateSelect = document.getElementById('deckTemplateSelect');
+      if (templateSelect) {
+        templateSelect.value = event.deckType;
+      }
+      resetVotingStateLocally();
+      break;
+
     case 'timer_reset':
       // Reset timer
       state.timerSeconds = 0;
       renderTimer();
       break;
-      
+
     case 'timer_sync':
       // Sync clock timer from oldest user (timer master)
       // Only accept if we are not the timer host ourselves
@@ -1023,19 +1133,19 @@ function resetVotingStateLocally() {
   state.currentVote = null;
   state.voteTime = 0;
   state.voteTimerStart = Date.now();
-  
+
   // Clear CSS selections
   document.querySelectorAll('.poker-card-container').forEach(card => {
     card.classList.remove('selected');
   });
-  
+
   // Clear all player votes
   Object.keys(state.players).forEach(id => {
     state.players[id].vote = null;
     state.players[id].hasVoted = false;
     state.players[id].timeToVote = 0;
   });
-  
+
   renderPlayersList();
   updateStateBanner();
   renderStats();
@@ -1045,44 +1155,49 @@ function resetVotingStateLocally() {
 function startPresenceHeartbeat() {
   // Send own ping immediately
   sendPing();
-  
-  // Set intervals
-  setInterval(() => {
+
+  if (state.heartbeatInterval) clearInterval(state.heartbeatInterval);
+  if (state.presenceCheckInterval) clearInterval(state.presenceCheckInterval);
+
+  // Set intervals: send ping every 5 minutes (300000ms)
+  state.heartbeatInterval = setInterval(() => {
     if (state.mqttClient && state.mqttClient.connected) {
       sendPing();
     }
-  }, 5000);
-  
-  // Check online status of peers
-  setInterval(() => {
+  }, 300000);
+
+  // Check online status of peers every 10 seconds
+  state.presenceCheckInterval = setInterval(() => {
     const now = Date.now();
     let changed = false;
-    
+
     Object.keys(state.players).forEach(id => {
       if (id === state.userId) return; // Skip self
-      
+
       const player = state.players[id];
       // Skip simulated players in offline mode
       if (state.isOfflineMode && id.startsWith('mock_user_')) return;
-      
-      if (player.status === 'online' && now - player.lastActive > 12000) {
+
+      // Mark offline if no heartbeat for 10 minutes (600000ms)
+      if (player.status === 'online' && now - player.lastActive > 600000) {
         player.status = 'offline';
         changed = true;
       }
-      
-      if (now - player.lastActive > 20000) {
+
+      // Expire session (remove player) if no heartbeat for 15 minutes (900000ms)
+      if (now - player.lastActive > 900000) {
         delete state.players[id];
         changed = true;
         console.log(`Player ${player.name} timed out and was removed.`);
       }
     });
-    
+
     if (changed) {
       renderPlayersList();
       updateStateBanner();
       renderStats();
     }
-  }, 2000);
+  }, 10000);
 }
 
 function sendPing() {
@@ -1096,17 +1211,17 @@ function sendPing() {
 // Stopwatch loop
 function startTimerProcess() {
   if (state.timerInterval) clearInterval(state.timerInterval);
-  
+
   state.timerInterval = setInterval(() => {
     // Determine if we should maintain/broadcast the timer:
     // We are the timer master if we are the oldest player online in our list.
     const sortedUserIds = Object.keys(state.players).sort();
     state.isTimerHost = sortedUserIds[0] === state.userId;
-    
+
     if (state.isTimerHost || state.isOfflineMode) {
       state.timerSeconds++;
       renderTimer();
-      
+
       // Broadcast timer sync online
       if (!state.isOfflineMode && state.timerSeconds % 2 === 0) {
         sendRoomEvent('timer_sync', { seconds: state.timerSeconds });
@@ -1117,23 +1232,32 @@ function startTimerProcess() {
 
 // Leave room return to welcome screen
 function leaveRoom() {
+  destroyLocalActivityTracking();
   if (state.timerInterval) {
     clearInterval(state.timerInterval);
     state.timerInterval = null;
   }
-  
+  if (state.heartbeatInterval) {
+    clearInterval(state.heartbeatInterval);
+    state.heartbeatInterval = null;
+  }
+  if (state.presenceCheckInterval) {
+    clearInterval(state.presenceCheckInterval);
+    state.presenceCheckInterval = null;
+  }
+
   if (state.mqttClient) {
     try {
       // Broadcast leave notice if possible
       state.mqttClient.end(true);
-    } catch(e) {}
+    } catch (e) { }
     state.mqttClient = null;
   }
-  
+
   // Clear tip banner if any
   const tip = document.getElementById('demoTipBanner');
   if (tip) tip.remove();
-  
+
   // Reset states
   state.players = {};
   state.roomId = '';
@@ -1141,7 +1265,7 @@ function leaveRoom() {
   state.currentVote = null;
   state.gameState = 'voting';
   state.timerSeconds = 0;
-  
+
   // Reset card grid selections
   document.querySelectorAll('.poker-card-container').forEach(card => {
     card.classList.remove('selected');
@@ -1160,17 +1284,17 @@ function leaveRoom() {
 function handleOfflineSimulationEvent(event) {
   console.log('Processing offline event:', event);
   const now = Date.now();
-  
-  switch(event.type) {
+
+  switch (event.type) {
     case 'vote_status':
       // The user voted or unvoted
       state.players[state.userId].hasVoted = event.hasVoted;
       state.players[state.userId].vote = event.vote;
       state.players[state.userId].timeToVote = event.voteTime;
-      
+
       renderPlayersList();
       updateStateBanner();
-      
+
       // Trigger simulated voters after 1-3 seconds
       if (event.hasVoted) {
         Object.keys(state.players).forEach(id => {
@@ -1182,14 +1306,27 @@ function handleOfflineSimulationEvent(event) {
               // Ensure we are still in voting state
               if (state.gameState === 'voting') {
                 player.hasVoted = true;
-                // Generate a reasonable planning poker value (bias towards 3, 5, 8)
-                const mockWeights = ['1', '2', '3', '3', '5', '5', '5', '8', '8', '13', '?', 'C'];
-                // Wait, DECK_VALUES in screenshot are 0-10, ?, C. Let's bias weights for it:
-                const screenshotWeights = ['1', '2', '3', '3', '5', '5', '5', '8', '8', '10', '?', 'C'];
-                const selectedVal = screenshotWeights[Math.floor(Math.random() * screenshotWeights.length)];
+
+                // Select a dynamic reasonable estimate from the current deck (bias towards middle values)
+                const validValues = state.deckValues.filter(v => v !== '?' && v !== 'C');
+                let selectedVal = '5';
+                if (validValues.length > 0) {
+                  const midIdx = Math.floor(validValues.length / 2);
+                  const weightedList = [];
+                  validValues.forEach((val, idx) => {
+                    const weight = Math.max(1, 4 - Math.abs(idx - midIdx));
+                    for (let w = 0; w < weight; w++) {
+                      weightedList.push(val);
+                    }
+                  });
+                  selectedVal = weightedList[Math.floor(Math.random() * weightedList.length)];
+                } else {
+                  selectedVal = state.deckValues[Math.floor(Math.random() * state.deckValues.length)] || '5';
+                }
+
                 player.vote = selectedVal;
                 player.timeToVote = Math.round((Date.now() - state.voteTimerStart) / 1000);
-                
+
                 renderPlayersList();
                 updateStateBanner();
               }
@@ -1198,7 +1335,7 @@ function handleOfflineSimulationEvent(event) {
         });
       }
       break;
-      
+
     case 'flip_cards':
       state.gameState = 'revealed';
       // Force all mock players to vote if they haven't yet, so we have stats
@@ -1207,7 +1344,8 @@ function handleOfflineSimulationEvent(event) {
         const player = state.players[id];
         if (!player.hasVoted) {
           player.hasVoted = true;
-          player.vote = '5'; // Default mock vote
+          const midIdx = Math.max(0, Math.floor(state.deckValues.length / 2) - 1);
+          player.vote = state.deckValues[midIdx] || '5'; // Use middle deck value
           player.timeToVote = 2;
         }
       });
@@ -1215,11 +1353,21 @@ function handleOfflineSimulationEvent(event) {
       updateStateBanner();
       renderStats();
       break;
-      
+
     case 'clear_votes':
       resetVotingStateLocally();
       break;
-      
+
+    case 'change_template':
+      updateDeckValues(event.deckType);
+      renderDeck();
+      const templateSelect = document.getElementById('deckTemplateSelect');
+      if (templateSelect) {
+        templateSelect.value = event.deckType;
+      }
+      resetVotingStateLocally();
+      break;
+
     case 'skip_story':
       resetVotingStateLocally();
       state.currentStory = 'Next Estimating Story';
@@ -1227,12 +1375,12 @@ function handleOfflineSimulationEvent(event) {
       state.timerSeconds = 0;
       renderTimer();
       break;
-      
+
     case 'edit_story':
       state.currentStory = event.title;
       document.getElementById('storyTitleDisplay').innerText = state.currentStory;
       break;
-      
+
     case 'timer_reset':
       state.timerSeconds = 0;
       renderTimer();
