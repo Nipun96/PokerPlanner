@@ -116,7 +116,7 @@
             <h2 id="roomTitleDisplay">room</h2>
             <div class="story-container">
               <div class="story-title-wrapper" id="storyTitleWrapper">
-                <span id="storyTitleDisplay">test</span>
+                <span id="storyTitleDisplay">Story #1</span>
                 <button id="editStoryBtn" class="btn-icon-inline" title="Edit Story Description">
                   <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                     <path d="M12 20h9M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"/>
@@ -124,7 +124,7 @@
                 </button>
               </div>
               <div class="story-edit-wrapper" id="storyEditWrapper" style="display: none;">
-                <input type="text" id="storyInput" maxlength="60" placeholder="Estimate description (e.g. Jira-123)...">
+                <input type="text" id="storyInput" maxlength="60" placeholder="Story title (e.g. JIRA-123)...">
                 <button id="saveStoryBtn" class="btn-save" title="Save">
                   <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
                     <polyline points="20 6 9 17 4 12"></polyline>
@@ -187,9 +187,26 @@
             </div>
             <!-- Dynamic chart placeholder or frequency distribution -->
             <div class="vote-distribution">
-              <h4>Vote Distribution</h4>
-              <div id="distributionBarChart" class="distribution-chart">
-                <!-- Populated dynamically -->
+              <div class="distribution-header">
+                <h4>Vote Distribution</h4>
+                <div class="chart-type-toggle">
+                  <button type="button" id="chartViewBothBtn" class="chart-toggle-btn active" title="Show Both Charts">Both</button>
+                  <button type="button" id="chartViewBarBtn" class="chart-toggle-btn" title="Bar Chart View">Bars</button>
+                  <button type="button" id="chartViewPieBtn" class="chart-toggle-btn" title="Pie Chart View">Pie Chart</button>
+                </div>
+              </div>
+              
+              <div id="chartsContainer" class="charts-container view-both">
+                <div class="chart-box bar-box">
+                  <div id="distributionBarChart" class="distribution-chart">
+                    <!-- Populated dynamically -->
+                  </div>
+                </div>
+                <div class="chart-box pie-box">
+                  <div id="distributionPieChart" class="pie-chart-container">
+                    <!-- Populated dynamically -->
+                  </div>
+                </div>
               </div>
             </div>
           </div>

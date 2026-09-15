@@ -11,8 +11,8 @@ const DECK_VALUES = ['0', '1', '2', '3', '4', '5', '6', '7', '8', '9', '10', '?'
 // Public secure WebSocket MQTT brokers to try in sequence
 const BROKERS = [
   'wss://broker.emqx.io:8084/mqtt',
-  'wss://test.mosquitto.org:8081/mqtt',
-  'wss://broker.hivemq.com:8000/mqtt' // Insecure WebSocket fallback (may be blocked by browser HTTPS)
+  'wss://broker.hivemq.com:8884/mqtt',
+  'wss://test.mosquitto.org:8081/mqtt'
 ];
 
 // ==========================================================================
@@ -26,7 +26,9 @@ const state = {
   // Room Status
   roomName: '',
   roomId: '',
-  currentStory: 'Estimate Task Description',
+  invitedRoomId: '',
+  invitedRoomName: '',
+  currentStory: 'Story #1',
   gameState: 'voting', // 'voting' | 'revealed'
 
   // Timer State
@@ -89,13 +91,54 @@ function loadProfileFromCache() {
   renderRecentRooms();
 }
 
+// Safely parse room ID and name from URL hash fragment
+function parseRoomHash(hashStr) {
+  if (!hashStr || !hashStr.startsWith('#/room/')) return null;
+
+  const raw = hashStr.substring(7);
+  const qIndex = raw.indexOf('?');
+  let rawPath = raw;
+  let queryString = '';
+
+  if (qIndex !== -1) {
+    rawPath = raw.substring(0, qIndex);
+    queryString = raw.substring(qIndex + 1);
+  }
+
+  rawPath = rawPath.replace(/\/+$|#+$/g, '');
+  if (!rawPath) return null;
+
+  const roomId = decodeURIComponent(rawPath);
+  let roomName = '';
+
+  if (queryString) {
+    const urlParams = new URLSearchParams(queryString);
+    roomName = urlParams.get('name') || '';
+  }
+
+  return { roomId, roomName };
+}
+
 // Check URL hash for room auto-routing
 function initRouting() {
-  const hash = window.location.hash;
-  if (hash.startsWith('#/room/')) {
-    const roomId = decodeURIComponent(hash.substring(7));
-    state.roomId = roomId;
-    state.roomName = roomId.split('-')[0] || roomId; // Extract room title
+  const parsed = parseRoomHash(window.location.hash);
+  if (parsed && parsed.roomId) {
+    state.roomId = parsed.roomId;
+    state.invitedRoomId = parsed.roomId;
+
+    if (parsed.roomName) {
+      state.roomName = parsed.roomName;
+      state.invitedRoomName = parsed.roomName;
+    } else {
+      // Fallback: extract from roomId
+      const parts = parsed.roomId.split('-');
+      if (parts.length > 1) {
+        state.roomName = parts.slice(0, -1).map(word => word.charAt(0).toUpperCase() + word.slice(1)).join(' ');
+      } else {
+        state.roomName = parsed.roomId;
+      }
+      state.invitedRoomName = state.roomName;
+    }
 
     // Fill the room input
     document.getElementById('roomInput').value = state.roomName;
@@ -331,6 +374,7 @@ function renderRecentRooms() {
 
     li.addEventListener('click', () => {
       document.getElementById('roomInput').value = item.roomName;
+      state.roomId = item.roomId; // Set room ID to rejoin the exact same room
       if (state.username) {
         state.roomName = item.roomName;
         joinRoom();
@@ -481,7 +525,7 @@ function renderStats() {
   document.getElementById('statRange').innerText = voteRange;
   document.getElementById('statAgreement').innerText = `${agreement}%`;
 
-  // Render distribution chart
+  // Render distribution chart & pie chart
   const chartContainer = document.getElementById('distributionBarChart');
   chartContainer.innerHTML = '';
 
@@ -490,26 +534,169 @@ function renderStats() {
     return state.deckValues.indexOf(a) - state.deckValues.indexOf(b);
   });
 
-  sortedVoteKeys.forEach(voteVal => {
+  const colors = ['#3b82f6', '#10b981', '#8b5cf6', '#f59e0b', '#ec4899', '#06b6d4', '#f97316', '#6366f1'];
+
+  sortedVoteKeys.forEach((voteVal, idx) => {
     const count = freqMap[voteVal];
     const percentage = Math.round((count / votes.length) * 100);
+    const color = colors[idx % colors.length];
     const row = document.createElement('div');
     row.className = 'chart-row';
 
     row.innerHTML = `
       <span class="chart-value-label">${voteVal === 'C' ? '☕' : voteVal}</span>
       <div class="chart-bar-container">
-        <div class="chart-bar" style="width: ${percentage}%"></div>
+        <div class="chart-bar" style="width: ${percentage}%; background: ${color};"></div>
       </div>
       <span class="chart-count-label">${count} vote${count > 1 ? 's' : ''} (${percentage}%)</span>
     `;
     chartContainer.appendChild(row);
   });
 
+  // Render Pie Chart
+  renderPieChart(sortedVoteKeys, freqMap, votes.length);
+
   // Trigger confetti if consensus is 100% agreement and at least 2 real votes
   if (agreement === 100 && votes.length >= 2 && consensusValue !== '?' && consensusValue !== 'C') {
     triggerConfetti();
   }
+}
+
+// Render interactive SVG Pie/Donut Chart with Legend
+function renderPieChart(sortedVoteKeys, freqMap, totalVotes) {
+  const pieContainer = document.getElementById('distributionPieChart');
+  if (!pieContainer) return;
+  pieContainer.innerHTML = '';
+
+  if (totalVotes === 0 || sortedVoteKeys.length === 0) {
+    pieContainer.innerHTML = '<div class="no-votes-msg">No votes recorded</div>';
+    return;
+  }
+
+  const colors = ['#3b82f6', '#10b981', '#8b5cf6', '#f59e0b', '#ec4899', '#06b6d4', '#f97316', '#6366f1'];
+  const size = 140;
+  const center = size / 2;
+  const outerR = 60;
+  const innerR = 36;
+
+  let startAngle = -Math.PI / 2; // Start from 12 o'clock
+
+  const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+  svg.setAttribute('viewBox', `0 0 ${size} ${size}`);
+  svg.setAttribute('class', 'pie-chart-svg');
+
+  const gSlices = document.createElementNS('http://www.w3.org/2000/svg', 'g');
+
+  const legendContainer = document.createElement('div');
+  legendContainer.className = 'pie-legend';
+
+  sortedVoteKeys.forEach((voteVal, idx) => {
+    const count = freqMap[voteVal];
+    const fraction = count / totalVotes;
+    const angle = fraction * 2 * Math.PI;
+    const endAngle = startAngle + angle;
+    const color = colors[idx % colors.length];
+    const displayLabel = voteVal === 'C' ? '☕' : voteVal;
+    const percentage = Math.round(fraction * 100);
+
+    const legendItem = document.createElement('div');
+    legendItem.className = 'legend-item';
+    legendItem.innerHTML = `
+      <span class="legend-color-dot" style="background-color: ${color}"></span>
+      <span class="legend-label">${displayLabel}</span>
+      <span class="legend-value">${count} (${percentage}%)</span>
+    `;
+
+    if (fraction >= 0.999) {
+      // 100% single slice / single vote: use a stroke-width ring circle to prevent SVG arc degeneracies
+      const circle = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
+      circle.setAttribute('cx', center);
+      circle.setAttribute('cy', center);
+      circle.setAttribute('r', (outerR + innerR) / 2);
+      circle.setAttribute('fill', 'none');
+      circle.setAttribute('stroke', color);
+      circle.setAttribute('stroke-width', outerR - innerR);
+      circle.setAttribute('class', 'pie-slice');
+      circle.dataset.vote = voteVal;
+      circle.innerHTML = `<title>${displayLabel}: ${count} vote${count > 1 ? 's' : ''} (${percentage}%)</title>`;
+
+      circle.addEventListener('mouseenter', () => legendItem.classList.add('active'));
+      circle.addEventListener('mouseleave', () => legendItem.classList.remove('active'));
+      legendItem.addEventListener('mouseenter', () => circle.classList.add('active'));
+      legendItem.addEventListener('mouseleave', () => circle.classList.remove('active'));
+
+      gSlices.appendChild(circle);
+      legendContainer.appendChild(legendItem);
+      return;
+    }
+
+    const x1 = center + outerR * Math.cos(startAngle);
+    const y1 = center + outerR * Math.sin(startAngle);
+    const x2 = center + outerR * Math.cos(endAngle);
+    const y2 = center + outerR * Math.sin(endAngle);
+
+    const ix1 = center + innerR * Math.cos(endAngle);
+    const iy1 = center + innerR * Math.sin(endAngle);
+    const ix2 = center + innerR * Math.cos(startAngle);
+    const iy2 = center + innerR * Math.sin(startAngle);
+
+    const largeArc = fraction > 0.5 ? 1 : 0;
+
+    const pathD = `
+      M ${x1.toFixed(2)} ${y1.toFixed(2)}
+      A ${outerR} ${outerR} 0 ${largeArc} 1 ${x2.toFixed(2)} ${y2.toFixed(2)}
+      L ${ix1.toFixed(2)} ${iy1.toFixed(2)}
+      A ${innerR} ${innerR} 0 ${largeArc} 0 ${ix2.toFixed(2)} ${iy2.toFixed(2)}
+      Z
+    `;
+
+    const path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+    path.setAttribute('d', pathD);
+    path.setAttribute('fill', color);
+    path.setAttribute('class', 'pie-slice');
+    path.dataset.vote = voteVal;
+    path.innerHTML = `<title>${displayLabel}: ${count} vote${count > 1 ? 's' : ''} (${percentage}%)</title>`;
+
+    path.addEventListener('mouseenter', () => legendItem.classList.add('active'));
+    path.addEventListener('mouseleave', () => legendItem.classList.remove('active'));
+    legendItem.addEventListener('mouseenter', () => path.classList.add('active'));
+    legendItem.addEventListener('mouseleave', () => path.classList.remove('active'));
+
+    gSlices.appendChild(path);
+    legendContainer.appendChild(legendItem);
+
+    startAngle = endAngle;
+  });
+
+  svg.appendChild(gSlices);
+
+  const centerTextG = document.createElementNS('http://www.w3.org/2000/svg', 'g');
+  centerTextG.setAttribute('class', 'pie-center-text');
+
+  const textVal = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+  textVal.setAttribute('x', center);
+  textVal.setAttribute('y', center - 6);
+  textVal.setAttribute('text-anchor', 'middle');
+  textVal.setAttribute('class', 'center-value');
+  textVal.textContent = totalVotes.toString();
+
+  const textLabel = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+  textLabel.setAttribute('x', center);
+  textLabel.setAttribute('y', center + 12);
+  textLabel.setAttribute('text-anchor', 'middle');
+  textLabel.setAttribute('class', 'center-label');
+  textLabel.textContent = totalVotes === 1 ? 'Vote' : 'Votes';
+
+  centerTextG.appendChild(textVal);
+  centerTextG.appendChild(textLabel);
+  svg.appendChild(centerTextG);
+
+  const wrapper = document.createElement('div');
+  wrapper.className = 'pie-chart-flex';
+  wrapper.appendChild(svg);
+  wrapper.appendChild(legendContainer);
+
+  pieContainer.appendChild(wrapper);
 }
 
 // Confetti blast animation
@@ -564,12 +751,31 @@ function setupEventListeners() {
   document.getElementById('joinForm').addEventListener('submit', (e) => {
     e.preventDefault();
     state.username = document.getElementById('usernameInput').value.trim();
-    state.roomName = document.getElementById('roomInput').value.trim();
+    const inputRoomName = document.getElementById('roomInput').value.trim();
 
-    if (state.username && state.roomName) {
+    if (state.username && inputRoomName) {
+      // Preserve invitedRoomId if user kept the invited room name
+      if (state.invitedRoomName && state.invitedRoomId &&
+          inputRoomName.toLowerCase() === state.invitedRoomName.toLowerCase()) {
+        state.roomId = state.invitedRoomId;
+        state.roomName = state.invitedRoomName;
+      } else {
+        // User manually entered a different room name, clear invitedRoomId
+        state.roomId = '';
+        state.roomName = inputRoomName;
+      }
+
       // Save profile to localstorage
       localStorage.setItem('poker_user_profile', JSON.stringify({ username: state.username }));
       joinRoom();
+    }
+  });
+
+  // Dynamic hash change listener for shared link clicks while app is open
+  window.addEventListener('hashchange', () => {
+    const parsed = parseRoomHash(window.location.hash);
+    if (parsed && parsed.roomId && parsed.roomId !== state.roomId) {
+      initRouting();
     }
   });
 
@@ -612,6 +818,34 @@ function setupEventListeners() {
   document.getElementById('deckTemplateSelect').addEventListener('change', (e) => {
     sendRoomEvent('change_template', { deckType: e.target.value });
   });
+
+  // Chart view toggle listeners
+  const chartsContainer = document.getElementById('chartsContainer');
+  const btnBoth = document.getElementById('chartViewBothBtn');
+  const btnBar = document.getElementById('chartViewBarBtn');
+  const btnPie = document.getElementById('chartViewPieBtn');
+
+  if (chartsContainer && btnBoth && btnBar && btnPie) {
+    const setChartView = (mode) => {
+      [btnBoth, btnBar, btnPie].forEach(btn => btn.classList.remove('active'));
+      chartsContainer.classList.remove('view-both', 'view-bars', 'view-pie');
+
+      if (mode === 'both') {
+        btnBoth.classList.add('active');
+        chartsContainer.classList.add('view-both');
+      } else if (mode === 'bars') {
+        btnBar.classList.add('active');
+        chartsContainer.classList.add('view-bars');
+      } else if (mode === 'pie') {
+        btnPie.classList.add('active');
+        chartsContainer.classList.add('view-pie');
+      }
+    };
+
+    btnBoth.addEventListener('click', () => setChartView('both'));
+    btnBar.addEventListener('click', () => setChartView('bars'));
+    btnPie.addEventListener('click', () => setChartView('pie'));
+  }
 }
 
 // Toggle light/dark stylesheet themes
@@ -683,13 +917,19 @@ function toggleInviteAccordion() {
   }
 }
 
-// Copy URL to Clipboard
+// Copy URL to Clipboard with fallback support
 function copyInviteLink() {
   const copyText = document.getElementById('inviteLinkInput');
+  const baseUrl = window.location.href.split('#')[0];
+  const targetHash = window.location.hash || `#/room/${encodeURIComponent(state.roomId)}?name=${encodeURIComponent(state.roomName)}`;
+  copyText.value = baseUrl + targetHash;
+
   copyText.select();
   copyText.setSelectionRange(0, 99999); // Mobile compatibility
 
-  navigator.clipboard.writeText(copyText.value).then(() => {
+  const textToCopy = copyText.value;
+
+  const handleSuccess = () => {
     const copyBtn = document.getElementById('copyInviteLinkBtn');
     const originalText = copyBtn.innerText;
     copyBtn.innerText = 'Copied!';
@@ -699,9 +939,25 @@ function copyInviteLink() {
       copyBtn.innerText = originalText;
       copyBtn.style.backgroundColor = 'var(--primary-color)';
     }, 2000);
-  }).catch(err => {
-    console.error('Failed to copy text: ', err);
-  });
+  };
+
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    navigator.clipboard.writeText(textToCopy).then(handleSuccess).catch(() => {
+      try {
+        document.execCommand('copy');
+        handleSuccess();
+      } catch (err) {
+        console.error('Failed to copy text: ', err);
+      }
+    });
+  } else {
+    try {
+      document.execCommand('copy');
+      handleSuccess();
+    } catch (err) {
+      console.error('Failed to copy text: ', err);
+    }
+  }
 }
 
 // Highlight cards in board deck
@@ -754,13 +1010,18 @@ function handleCardSelection(value) {
 function joinRoom() {
   // Set room names
   state.roomId = state.roomId || slugify(state.roomName) + '-' + Math.random().toString(36).substring(2, 6);
-  window.location.hash = `/room/${encodeURIComponent(state.roomId)}`;
+  const targetHash = `#/room/${encodeURIComponent(state.roomId)}?name=${encodeURIComponent(state.roomName)}`;
+
+  if (window.location.hash !== targetHash) {
+    window.location.hash = targetHash;
+  }
 
   document.getElementById('roomTitleDisplay').innerText = state.roomName;
   document.getElementById('storyTitleDisplay').innerText = state.currentStory;
 
-  // Generate invite link URL
-  const inviteUrl = window.location.origin + window.location.pathname + window.location.hash;
+  // Generate invite link URL reliably without opaque origin issues
+  const baseUrl = window.location.href.split('#')[0];
+  const inviteUrl = baseUrl + targetHash;
   document.getElementById('inviteLinkInput').value = inviteUrl;
 
   // Add room to recent localstorage cache
@@ -818,7 +1079,7 @@ function connectToBroker() {
   state.connectionTimeout = setTimeout(() => {
     console.warn(`Connection timeout for broker ${brokerUrl}`);
     handleConnectionFailure();
-  }, 7000); // Wait 7 seconds before failing over
+  }, 12000); // Wait 12 seconds before failing over
 
   try {
     const options = {
@@ -1015,7 +1276,7 @@ function handleIncomingEvent(event) {
         if (event.gameState === 'revealed') {
           state.gameState = 'revealed';
         }
-        if (event.currentStory && state.currentStory === 'Estimate Task Description') {
+        if (event.currentStory && event.currentStory !== state.currentStory) {
           state.currentStory = event.currentStory;
           document.getElementById('storyTitleDisplay').innerText = state.currentStory;
         }

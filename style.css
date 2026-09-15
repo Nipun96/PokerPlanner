@@ -807,10 +807,93 @@ button, input {
   padding-top: 20px;
 }
 
-.vote-distribution h4 {
+.distribution-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 16px;
+  flex-wrap: wrap;
+  gap: 12px;
+}
+
+.distribution-header h4 {
   font-size: 0.9rem;
   color: var(--text-secondary);
-  margin-bottom: 16px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  font-weight: 600;
+}
+
+.chart-type-toggle {
+  display: flex;
+  background-color: var(--bg-primary);
+  padding: 3px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border-color);
+  gap: 2px;
+}
+
+.chart-toggle-btn {
+  background: transparent;
+  border: none;
+  color: var(--text-secondary);
+  font-size: 0.75rem;
+  font-weight: 600;
+  padding: 4px 10px;
+  border-radius: 6px;
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.chart-toggle-btn:hover {
+  color: var(--text-primary);
+}
+
+.chart-toggle-btn.active {
+  background-color: var(--bg-surface);
+  color: var(--primary-color);
+  box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+}
+
+/* Charts Container Layout */
+.charts-container {
+  display: grid;
+  gap: 20px;
+  transition: all 0.3s ease;
+}
+
+.charts-container.view-both {
+  grid-template-columns: 1fr 1fr;
+}
+
+.charts-container.view-bars {
+  grid-template-columns: 1fr;
+}
+.charts-container.view-bars .pie-box {
+  display: none;
+}
+
+.charts-container.view-pie {
+  grid-template-columns: 1fr;
+}
+.charts-container.view-pie .bar-box {
+  display: none;
+}
+
+@media (max-width: 700px) {
+  .charts-container.view-both {
+    grid-template-columns: 1fr;
+  }
+}
+
+.chart-box {
+  background-color: var(--bg-primary);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-md);
+  padding: 16px;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
 }
 
 .distribution-chart {
@@ -835,7 +918,8 @@ button, input {
 .chart-bar-container {
   flex: 1;
   height: 24px;
-  background-color: var(--bg-primary);
+  background-color: var(--bg-surface);
+  border: 1px solid var(--border-color);
   border-radius: var(--radius-sm);
   overflow: hidden;
   position: relative;
@@ -843,16 +927,124 @@ button, input {
 
 .chart-bar {
   height: 100%;
-  background: linear-gradient(90deg, var(--primary-color), var(--border-focus));
   border-radius: var(--radius-sm);
   width: 0%; /* Dynamic */
   transition: width 0.6s cubic-bezier(0.1, 0.8, 0.2, 1);
 }
 
 .chart-count-label {
-  font-size: 0.85rem;
+  font-size: 0.82rem;
   color: var(--text-secondary);
-  width: 48px;
+  width: 90px;
+  text-align: right;
+  white-space: nowrap;
+}
+
+/* SVG Pie Chart Styling */
+.pie-chart-container {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.pie-chart-flex {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  width: 100%;
+  justify-content: center;
+}
+
+@media (max-width: 500px) {
+  .pie-chart-flex {
+    flex-direction: column;
+  }
+}
+
+.pie-chart-svg {
+  width: 140px;
+  height: 140px;
+  flex-shrink: 0;
+}
+
+.pie-slice {
+  transition: transform 0.25s cubic-bezier(0.2, 0.8, 0.2, 1), opacity 0.2s ease;
+  transform-origin: center;
+  cursor: pointer;
+}
+
+.pie-slice:hover, .pie-slice.active {
+  transform: scale(1.06);
+  filter: drop-shadow(0 4px 8px rgba(0,0,0,0.2));
+  opacity: 0.95;
+}
+
+.pie-center-text {
+  pointer-events: none;
+}
+
+.pie-center-text .center-value {
+  font-size: 20px;
+  font-weight: 700;
+  fill: var(--text-primary);
+  dominant-baseline: middle;
+}
+
+.pie-center-text .center-label {
+  font-size: 10px;
+  font-weight: 500;
+  fill: var(--text-secondary);
+  dominant-baseline: middle;
+}
+
+/* Pie Legend */
+.pie-legend {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  flex: 1;
+}
+
+.legend-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 8px;
+  border-radius: var(--radius-sm);
+  transition: background-color 0.2s ease;
+  cursor: pointer;
+}
+
+.legend-item:hover, .legend-item.active {
+  background-color: var(--bg-surface);
+}
+
+.legend-color-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+.legend-label {
+  font-weight: 600;
+  font-size: 0.85rem;
+  color: var(--text-primary);
+  min-width: 20px;
+}
+
+.legend-value {
+  font-size: 0.8rem;
+  color: var(--text-secondary);
+  margin-left: auto;
+}
+
+.no-votes-msg {
+  color: var(--text-secondary);
+  font-size: 0.85rem;
+  padding: 10px 0;
+  text-align: center;
 }
 
 /* ==========================================================================
